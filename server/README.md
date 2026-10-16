@@ -1252,8 +1252,25 @@ app.use("/mcp/*", async (c, next) => {
 app.route("/", mcpRoutes("/mcp", buildMcpServer, { allowedOrigins: new Set() }));
 ```
 
-An operation is `{ name, description, inputSchema, run(deps, args) }`, plus an optional `title`
-and `annotations`. Pass the same list to `buildOpenApi` as `mcpTools` (below), and the reference
+An operation is `{ name, title, description, inputSchema, annotations, run(deps, args) }`.
+`annotations` must set all three hints: `readOnlyHint`, `destructiveHint` and `openWorldHint`.
+Clients read them to decide whether a call needs the person's approval, and Claude's and OpenAI's
+plugin directories both refuse a tool that leaves one out. A read is `true, false, false`. A tool
+that fetches any web page is open world. A tool that sends a message or deletes a row is
+destructive, even when you could undo it.
+
+```ts
+const getPlace: ToolOperation<Deps, { id: string }, Place> = {
+  name: "get_place",
+  title: "Read a place",
+  description: "Reads one place by its id.",
+  inputSchema: z.object({ id: z.string() }).strict(),
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  run: async (deps, args) => deps.places.get(args.id),
+};
+```
+
+Pass the same list to `buildOpenApi` as `mcpTools` (below), and the reference
 lists exactly the tools you register, with their own arguments, in your order. A tool that takes
 more than its REST route needs this. A tool call has no headers, so a key that makes a retry safe
 travels as an argument, such as `idempotencyKey`. A card built from the route's `input` leaves that
@@ -1311,6 +1328,128 @@ eight backends said in a comment that they served both, and answered `/mcp/` wit
 
 We tested the SDK at 1.29.0 and 1.30.1, and Hono at 4.12.26 and 4.13.8. `@modelcontextprotocol/sdk`
 is an optional peer, behind the `/mcp` subpath, and the subpath imports nothing from Node.
+
+## Signing an agent in
+
+Claude, ChatGPT and Codex can't paste an API key into a header. They connect to your MCP door by
+signing in with OAuth, and both plugin directories refuse a signed-in server without it. `/oauth`
+is that sign-in. The token a client gets back is one of your own API keys, made by your
+`mintKey`, so your key check, your keys page and revoking a key work as they do today.
+
+It also signs in your own scripts on a machine whose browser can't come back to it: a server, a
+container, a chat. The script prints a link and a short code, the person approves on any device,
+and the script's next poll gets the key.
+
+```ts
+import { createOAuth, oauthRoutes } from "@gusnips/server/oauth";
+import { createPgOAuthStore } from "@gusnips/server/pg";
+
+const oauth = createOAuth({
+  issuer: "https://api.example.com",
+  resource: "https://api.example.com/mcp",
+  authorizePage: "https://example.com/oauth/authorize",
+  devicePage: "https://example.com/device",
+  secret: env.OAUTH_SECRET, // 32 random bytes or more, and never changed
+  store: createPgOAuthStore(pool, { table: "app.oauth_grants" }),
+  deviceClients: { "acme-cli": "Acme CLI" },
+  mintKey: async ({ subject, keyName }) => {
+    if (!(await mayHaveKey(subject))) return { refused: "Only admins can connect apps." };
+    return createApiKey(subject, keyName); // the same call your keys page makes
+  },
+});
+
+// A 401 from your door now says where to sign in.
+const errorResponse = createErrorResponse({ internal, validation, challenge: oauth.challenge });
+app.use("/oauth/*", rateLimit({ store, limit: 30, windowMs: 60_000, ... }));
+app.route("/", oauthRoutes(oauth)); // before your own CORS, which would answer its preflights
+```
+
+`oauth.challenge` is
+`Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp"`.
+A client that meets your door without a token reads it and starts the sign-in.
+
+Your web app draws two pages, behind its own sign-in, and reaches `oauth` through two routes of
+your API:
+
+- **The consent page** (`authorizePage`). The client sends the person there with its request in
+  the query string. `describe(query)` says what to show: the app's name, where the code goes, and
+  the name the key gets. `approve(query, userId)` returns `redirectTo`, where the browser goes
+  next. "Cancel" goes to `cancelUrl`. Check that the person may make a key before you call
+  `approve`, so a refusal shows on your page and not inside the client.
+- **The device page** (`devicePage`). The link the script prints carries the code. Show the code
+  from `describeDevice(code)`, the app's name, and this: go on only if you started this sign-in
+  yourself, just now, and the code matches the one on your screen. Nothing on the server can tell
+  a link the person started from one somebody else started and sent them (RFC 8628 §5.4), so
+  that sentence is the guard. Then `decideDevice(code, { subject: userId })`, or
+  `decideDevice(code, "deny")`.
+
+Serve both pages with `frame-ancestors 'none'`, so another site can't frame them and steal the
+click. Read the session on those two routes from a header, as an API does, not from a cookie,
+or protect them against cross-site requests.
+
+Both return `{ ok: false, reason, message }` instead of throwing. `reason` is one of
+`unknown-client`, `redirect-mismatch`, `invalid-request`, `wrong-resource` and `unknown-code`;
+word your own page for it, and never redirect on a refusal.
+
+The grants live in one table:
+
+```sql
+CREATE TABLE app.oauth_grants (
+  hash text PRIMARY KEY,
+  kind text NOT NULL CHECK (kind IN ('code', 'device')),
+  client_id text NOT NULL,
+  client_name text NOT NULL,
+  redirect_uri text,
+  code_challenge text,
+  user_code_hash text,
+  subject text,
+  key_name text,
+  status text NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'used')),
+  expires_at timestamptz NOT NULL,
+  polled_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX oauth_grants_user_code_idx ON app.oauth_grants (user_code_hash)
+  WHERE status = 'pending';
+CREATE INDEX oauth_grants_expires_at_idx ON app.oauth_grants (expires_at);
+```
+
+- **Only hashes are stored.** A code and a device code are SHA-256 in `hash`, and nothing in the
+  table signs anyone in. Run `oauth.prune()` once a night: it deletes grants that expired more
+  than a day ago.
+- **A client id comes three ways.** An https URL is a client metadata document: fetched, checked
+  and cached for five minutes, which the MCP spec asks for. It is fetched only by `describe` and
+  `approve`, behind your sign-in, and never by the public routes, so nobody can make your server
+  fetch a URL without signing in. Anything else is a registration (`POST /oauth/register`) that
+  stores nothing: the id is our signature over the client's name and redirects, so registering
+  costs no row. The third is a name in `deviceClients`.
+- **Only `deviceClients` may start a device sign-in.** A registered client picks its own name, so
+  anyone could start a sign-in called "Claude" and send the link to someone who never asked.
+- **A code works once, within 5 minutes**, with PKCE S256. A `resource` may be left out, or be
+  your door or your issuer; anything else is refused. The door must be on the issuer's origin,
+  and `createOAuth` throws when it isn't. A device sign-in lasts 10 minutes, the script polls every 5 seconds, a faster poll gets
+  `slow_down`, and the key is handed out once. A user code is 8 letters with no vowels,
+  `WDJB-MJHT`, and is read however it is typed.
+- **A redirect** may be https, http on localhost, or an app's own scheme such as `cursor://`.
+  Never a fragment, never `javascript:`, `data:` or `file:`, and never a handler of the operating
+  system's own (`ms-msdt:`, `search-ms:`, `mailto:`). A redirect on 127.0.0.1 may use any port at
+  sign-in, because a desktop app listens on whichever port is free (RFC 8252 §7.3).
+- **No expiry and no refresh token.** The key lasts until someone revokes it, like one pasted by
+  hand.
+- **On a server, fetch metadata documents with `fetchPublic`.** The default checks the URL's
+  shape and follows no redirect, which is all a Worker can do. `fetchPublic` from `/node` also
+  refuses a name that resolves to a private address:
+
+  ```ts
+  fetchClientDocument: async (url) => {
+    const got = await fetchPublic(url, { maxRedirects: 0, signal: AbortSignal.timeout(5_000) });
+    return got.ok ? got.response : null;
+  },
+  ```
+
+The client id format matches the first backend that shipped this, byte for byte. claude.ai and
+ChatGPT keep a client id forever, so a new format would disconnect every app already connected.
+`/oauth` imports nothing from Node and runs in a Worker; pass your own store there.
 
 ## A reference for your API
 

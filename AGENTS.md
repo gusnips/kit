@@ -67,10 +67,11 @@ serverkit/
 │       ├── logger/       ← createLogger() and the serializer that decides what a log line keeps
 │       ├── hono/         ← the edge: errorBoundary, guards, headers, CORS and the four adapters
 │       ├── supabase/     ← isAuthOutage(): did auth say no, or fail to answer?
-│       ├── pg/           ← createPgPool() with a bounded wait; createIdempotency(), the key replay
+│       ├── pg/           ← createPgPool() with a bounded wait; createIdempotency(); the OAuth store
 │       ├── redis/        ← createRedis(), the bounded probes, and the rate-limit window store
 │       ├── bullmq/       ← queues that delete finished jobs, the dead letter, the schedule sync
 │       ├── mcp/          ← the MCP door: tools that never throw, a limit per call, POST only
+│       ├── oauth/        ← sign-in for the MCP door: codes with PKCE, client documents, the device flow
 │       ├── openapi/      ← buildOpenApi(): the reference from the operation list, on the public origin
 │       ├── rate-limit.ts ← hitWindow() and the memory store; rateLimit() is in hono/
 │       ├── client-ip.ts  ← clientIpOf() and ipSubject(): the socket first, a header only from the proxy
@@ -236,7 +237,7 @@ both Bun 1.3.8 and Node 22. It is the driver's, not the runner's, and `describeT
 brackets is still right for the guard. Someone on IPv6 loopback writes `localhost` or passes the
 host outside the URL.
 
-### …and twenty-eight for `@gusnips/server`
+### …and twenty-nine for `@gusnips/server`
 
 21. **A success builder returns an ANSWER, not a body — so on Hono, import the adapters.** `ok`,
     `created`, `paginated` and `noContent` in `responses.ts` answer `{ status, body }`, because the
@@ -861,6 +862,12 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     it is compared both ways, and `{ id: string }` stands where `unknown` is asked for with no cast,
     also from an app's own operation type whose `run` is a property (tested).
 
+    `title` and the three hints (`readOnlyHint`, `destructiveHint`, `openWorldHint`) are required.
+    Claude's and OpenAI's plugin directories both refuse a tool without them (their review rules,
+    read 2026-10-16), and six of eight doors set none. Optional, they were left out; required,
+    each door's typecheck names the tool that lacks them before a reviewer does. `ToolLabels` is
+    a type, not an interface, because an interface does not fit the OpenAPI card's JSON object.
+
 46. **A webhook sender retries what waiting can fix, believes `Retry-After`, and counts on the
     row.** Seven senders, three lineages, and the decision after an attempt was different in each.
     Six retried every 4xx, and no sender read `Retry-After`. Redirects were handled three ways.
@@ -966,6 +973,26 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     sends it, and not on 402, which no raise in the fleet sends it on. All 42 planted defects were
     caught, with a green control.
 
+49. **A sign-in hands out the product's own key, once, and no public route fetches a URL.**
+    Lifted from the one backend that had MCP OAuth (362 lines, plus its routes and consent page)
+    when both plugin directories made OAuth the price of a listing (2026-10-16). The token is the
+    product's own API key, made by `mintKey`, so its key check, keys page and revocation stay the
+    only ones. The client id is that backend's envelope byte for byte: HMAC-SHA256 of
+    `${purpose}.${body}` under the raw secret, in base64url. claude.ai and ChatGPT keep a client id
+    forever, so a new format would have cut every connection already made, and the test signs one
+    with `node:crypto` the way that backend did. A code, and an approved device sign-in, change
+    state in the same statement that reads them, so two token requests cannot both get a key. A
+    planted change that left a polled sign-in `approved` failed the flow test and the race test
+    against a real Postgres. Only `deviceClients` may start a device sign-in: a registered client
+    names itself, so anyone could start one called "Claude" and send the link to a stranger. A
+    metadata document is fetched with no redirect followed, at most 5 KiB, and must name itself as
+    its `client_id`. It is fetched only by `describe` and `approve`, behind the product's sign-in:
+    the first version also fetched it on the token and device routes, so anyone could make the
+    server fetch any https URL, again and again, and a review before the first publish caught it.
+    The device page's code check stops a mistyped code, not phishing: somebody can run the real
+    CLI and send a stranger the link. The guard is the page saying to go on only if you started
+    the sign-in yourself (RFC 8628 §5.4), and the README says so.
+
 ### …and four for `@gusnips/sdkgen`
 
 Five backends each wrote an SDK generator, 426 to 616 lines each and 2,517 in all. What they share
@@ -973,7 +1000,7 @@ is the reader, the schema writer and the writer, and those came across with ever
 merged. The method loop and the transport under it came second: the loop was the same in all five
 once the product's choices (doc text, a spec field, hand-written members) became options.
 
-49. **A schema the writer does not understand throws. It never becomes `unknown`.** A wrong
+50. **A schema the writer does not understand throws. It never becomes `unknown`.** A wrong
     `unknown` in a published SDK compiles for everyone who installs it and tells none of them. The
     writer returns `unknown` only where the schema itself allows any value (`{}`, `true`, the
     values of a bare `object`), and refuses `allOf`, `$ref` and anything else it would have to guess at. The
@@ -981,7 +1008,7 @@ once the product's choices (doc text, a spec field, hand-written members) became
     a boolean schema and a tuple in one. `typeNames` reads names inside a generic, where one copy
     split on `|` and missed `JobDto` in `V1ListPage<JobDto>[]`.
 
-50. **The reader keeps every line where it was.** It blanks comments and strings to read the
+51. **The reader keeps every line where it was.** It blanks comments and strings to read the
     structure, then copies the ORIGINAL lines, so the two texts must match line for line. All five
     copies broke that, in four ways, and none had a test for any of them:
     - an escape inside a string dropped its escaped character, or blanked it to a space, so a
@@ -1017,7 +1044,7 @@ once the product's choices (doc text, a spec field, hand-written members) became
     than an adapter, because `liftContract` returns one string, so a caller cannot tell afterwards
     which declarations were roots.
 
-51. **The output goes through the repo's own prettier before it is compared.** The generated files
+52. **The output goes through the repo's own prettier before it is compared.** The generated files
     are checked in, so the generator's `--check` and `prettier --check` must never disagree about
     one file. A file that cannot be read for a reason other than not existing throws rather than
     reading as stale, because "stale" would send someone to regenerate over a permission error.
@@ -1031,7 +1058,7 @@ once the product's choices (doc text, a spec field, hand-written members) became
     it. None of its operations needed it, so its output did not change, and the day one does, its
     generator now stops and names the type instead of publishing `unknown`.
 
-52. **The transport asks the retry rule about the answer, and a write is repeatable only with a key
+53. **The transport asks the retry rule about the answer, and a write is repeatable only with a key
     the server reads.** Of the five SDKs, three decided from their own error class's `retryAfter`,
     a number or nothing, so a server's explicit `details.retryAfterSecs: null` never reached the
     decision; two read the body's wait before the `Retry-After` header and read the header only as

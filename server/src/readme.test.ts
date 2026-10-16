@@ -51,6 +51,7 @@ import {
 } from "./hono/index.ts";
 import type { RequestVariables } from "./hono/index.ts";
 import { mcpRoutes, registerOperation, type ToolOperation } from "./mcp/index.ts";
+import { createOAuth, type OAuthStore } from "./oauth/index.ts";
 import { buildOpenApi, createOpenApiResponder, type OpenApiOperation } from "./openapi/index.ts";
 import { isAuthOutage } from "./supabase/index.ts";
 import { createPgPool, pingPool } from "./pg/index.ts";
@@ -433,15 +434,18 @@ describe("README — an MCP door", () => {
     type Deps = { userId: string };
     const getPlace: ToolOperation<Deps, { id: string }, { id: string; owner: string }> = {
       name: "get_place",
+      title: "Read a place",
       description: "Reads one place by its id.",
       inputSchema: z.object({ id: z.string() }).strict(),
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       run: async (deps, args) => ({ id: args.id, owner: deps.userId }),
     };
     const findPlaces: ToolOperation<Deps, { q: string }, string[]> = {
       name: "find_places",
+      title: "Find places",
       description: "Finds places by name.",
       inputSchema: z.object({ q: z.string() }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       run: async (_deps, args) => [args.q],
     };
     const OPERATIONS = [getPlace, findPlaces];
@@ -568,6 +572,24 @@ describe("README — an MCP door", () => {
       message: "[mcp] the limit store did not answer",
       allowed: true,
     });
+  });
+});
+
+describe("README — signing an agent in", () => {
+  it("prints the challenge the door's 401 carries", () => {
+    const oauth = createOAuth({
+      issuer: "https://api.example.com",
+      resource: "https://api.example.com/mcp",
+      authorizePage: "https://example.com/oauth/authorize",
+      devicePage: "https://example.com/device",
+      secret: "x".repeat(32),
+      // Never reached: the challenge is computed from the options alone.
+      store: {} as OAuthStore,
+      mintKey: async () => "key_1",
+    });
+    expect(oauth.challenge).toBe(
+      'Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp"',
+    );
   });
 });
 

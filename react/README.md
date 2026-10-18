@@ -743,6 +743,73 @@ and send a stranger the link, and that sentence is the only guard against it. On
 page stays decided: it never asks the server again, because the server no longer knows the code,
 and asking on the next focus would tell someone who just said yes that their code is wrong.
 
+## A new API key, shown once
+
+```ts
+import { createKeyLifecycle } from "@gusnips/react/keys";
+
+export const apiKeys = createKeyLifecycle<ApiKey>();
+```
+
+Make it once, beside your query client, outside every route. It keeps each new key's secret in
+memory until the person presses Done. A second key never replaces the first, and a trip to your
+docs and back loses neither.
+
+Tell it who is signed in, and where, from the code that already hears about sign-in and workspace
+changes:
+
+```ts
+apiKeys.setScope(user ? `${user.id}:${workspaceId}` : null);
+```
+
+A new scope forgets every unread secret. A request started before the change rejects with
+`KeyScopeChangedError` instead of showing its secret, even when the same account signs straight
+back in. Build the scope from ids, never from an access token: a token refresh is not a new person.
+
+Send your create request through it:
+
+```ts
+const create = useMutation({
+  mutationFn: (name: string) =>
+    apiKeys.create(async () => {
+      const { key, ...record } = await api.post<NewApiKey>("/keys", { name });
+      return { record, key };
+    }),
+  onSuccess: () => queryClient.invalidateQueries({ queryKey: ["keys"] }),
+});
+```
+
+`create` keeps the secret and resolves only the record. In three products we read, `mutation.data`
+held the whole answer, so the secret stayed in react-query's cache for as long as the cache kept
+the mutation. A record that still contains the secret is refused, so that mistake shows on the
+first try. The reveal lands even when the page that asked has unmounted.
+
+Show what is unread, and let the person say they saved it:
+
+```tsx
+const reveals = useKeyReveals(apiKeys);
+
+return reveals.map(({ record, key }) => (
+  <KeyReveal key={record.id} secret={key} onDone={() => apiKeys.dismiss(record.id)} />
+));
+```
+
+Copy with `useCopy`, and keep Done separate: a copy can fail, and the secret must stay on screen
+when it does. Revoke goes through the same object:
+
+```ts
+mutationFn: (id: string) => apiKeys.revoke(id, () => api.delete(`/keys/${id}`)),
+```
+
+Only a successful revoke forgets that key's secret. A failed one leaves it on screen, because the
+key still works.
+
+Nothing is written to storage or the URL, so a reload loses an unread secret. While one is unread
+the tab asks before it closes, and the listener goes away with the last one, because a page with
+a `beforeunload` listener is kept out of some browsers' back-forward cache. Draw the list through
+`queryView`, so a failed refresh keeps the rows instead of saying there are no keys. Forms,
+permissions, plan limits and every word on the page stay yours.
+
 ## Also here
 
 `ErrorBoundary`, an SSE reader split into a platform-free parser and a stream wrapper,
@@ -825,6 +892,7 @@ lives behind a subpath, so you install a dependency only if you import the thing
 | `@gusnips/react/theme`    | `createTheme`, `startTheme`              | react                 |
 | `@gusnips/react/commands` | slash matching and `useSlashCommands`    | react                 |
 | `@gusnips/react/oauth`    | `useConsentRequest`, `useDeviceApproval` | @tanstack/react-query |
+| `@gusnips/react/keys`     | `createKeyLifecycle`, `useKeyReveals`    | react                 |
 
 The rule behind that table: **a peer marked optional must not be reachable from the main entry
 point.** An optional peer the barrel imports anyway is not optional: it is a required one whose

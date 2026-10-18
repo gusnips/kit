@@ -49,6 +49,10 @@
     "./oauth": {
       "types": "./dist/oauth.d.ts",
       "default": "./dist/oauth.js"
+    },
+    "./keys": {
+      "types": "./dist/keys.d.ts",
+      "default": "./dist/keys.js"
     }
   },
   "types": "./dist/index.d.ts",

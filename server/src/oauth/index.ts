@@ -181,6 +181,12 @@ export interface OAuthOptions {
   }): Promise<string | { refused: string }>;
   /** Your scripts and CLIs, by client id, for the device flow: `{ "acme-cli": "Acme CLI" }`. */
   deviceClients?: Readonly<Record<string, string>>;
+  /**
+   * The name a device sign-in's key gets, shown on your device page and your keys page. The
+   * default is `"<client> (device sign-in)"`, in English; pass your own words for another language.
+   * Cut to 60 characters.
+   */
+  deviceKeyName?: (clientName: string) => string;
   /** Shown by some clients beside the sign-in. */
   resourceName?: string;
   documentation?: string;
@@ -265,6 +271,10 @@ export function createOAuth(options: OAuthOptions) {
   const documents = new Map<string, { client: OAuthClient; until: number }>();
   const deviceClients = options.deviceClients ?? {};
   const isDeviceClient = (clientId: string) => Object.hasOwn(deviceClients, clientId);
+  const deviceKeyName = (clientName: string) => {
+    const name = options.deviceKeyName?.(clientName) ?? `${clientName} (device sign-in)`;
+    return name.slice(0, KEY_NAME_MAX);
+  };
 
   const sign = async (purpose: string, body: string) =>
     base64UrlOf(await hmacBytes(secret, `${purpose}.${body}`));
@@ -844,10 +854,6 @@ function randomUserCode(): string {
 
 function randomToken(): string {
   return base64UrlOf(crypto.getRandomValues(new Uint8Array(32)));
-}
-
-function deviceKeyName(clientName: string): string {
-  return `${clientName} (device sign-in)`.slice(0, KEY_NAME_MAX);
 }
 
 /** A host for a web address, the scheme for an app's own (`cursor:`). */

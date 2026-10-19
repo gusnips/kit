@@ -15,7 +15,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { bytesOfBase64 } from "../crypto.ts";
 import { ok } from "../hono/responses.ts";
-import { rateLimit } from "../hono/rate-limit.ts";
+import { rateLimit, type RateLimitStore } from "../hono/rate-limit.ts";
 import { memoryWindowStore, type RefusedHit } from "../rate-limit.ts";
 import type { ClientCredentials, OAuth, OAuthAnswer, OAuthRefusal } from "./index.ts";
 
@@ -33,7 +33,7 @@ const QUERY_MAX_LENGTH = 8_192;
 /** A user code, with room for the spaces and dash a person types. */
 const CODE_MAX_LENGTH = 32;
 
-export interface OAuthRoutesOptions<E extends Env = Env> {
+export type OAuthRoutesOptions<E extends Env = Env> = {
   /**
    * Who is starting a device sign-in, for its limit of 10 a minute: the caller's address, read the
    * way your proxy allows, or `null` to let one through uncounted. Anyone may start one before
@@ -42,7 +42,14 @@ export interface OAuthRoutesOptions<E extends Env = Env> {
   deviceKey: (c: Context<E>) => string | null;
   /** Your own 429 for that limit, from your `errors` table. `hit.retryAfterSecs` is its wait. */
   refuse: (hit: RefusedHit, scope: string) => Error;
-}
+} &
+  /**
+   * Where that limit counts: this process's memory unless you pass a `store`, so N instances
+   * allow 10 x N a minute. Pass a shared one when a process is not the whole server, as on a
+   * Worker, where each isolate would count alone. A store that can fail comes with
+   * `whenStoreFails` and `logger`, the same as `rateLimit`'s.
+   */
+  ({ store?: undefined; whenStoreFails?: never; logger?: never } | RateLimitStore);
 
 /**
  * Whether `oauthRoutes` answers this path. They set their own CORS, any origin and no cookie, so
@@ -84,15 +91,14 @@ export function oauthRoutes<E extends Env = Env>(
     onError: (c) =>
       c.json({ error: "invalid_request", error_description: "The body is over 64 KiB" }, 413),
   });
-  // ponytail: counted in this process's memory, so N instances allow 10 x N a minute. That still
-  // bounds the rows; a shared store is the upgrade if one caller ever spreads across instances.
+  const { deviceKey, refuse, ...counted } = options;
   const deviceLimit = rateLimit<E>({
     scope: "oauth-device",
-    store: memoryWindowStore(),
     limit: DEVICE_STARTS_PER_MINUTE,
     windowMs: 60_000,
-    key: options.deviceKey,
-    refuse: options.refuse,
+    key: deviceKey,
+    refuse,
+    ...(counted.store ? counted : { store: memoryWindowStore() }),
   });
 
   // RFC 9728 lets a client read either. The MCP spec tries the one with the door's path first.
@@ -154,6 +160,13 @@ export function oauthConsoleRoutes<E extends Env = Env>(
   options: OAuthConsoleOptions<E>,
 ): Hono<E> {
   const r = new Hono<E>();
+  // `/approve`'s `redirectTo` carries the code, and every other answer says who is asking whom:
+  // none of it may sit in a cache between your API and the page. Path by path, as above.
+  for (const path of ["/request", "/approve", "/device"])
+    r.use(path, async (c, next) => {
+      forbidCaching(c);
+      await next();
+    });
   r.get("/request", async (c) => {
     const query = new URL(c.req.url).search.slice(1);
     return ok(
@@ -201,12 +214,14 @@ function malformed(): OAuthRefusal {
   };
 }
 
-/** A token or a secret must never be cached between us and the client (RFC 6749 §5.1). */
+/** A token, a secret or a code must never be cached between us and the client (RFC 6749 §5.1). */
+function forbidCaching<E extends Env>(c: Context<E>): void {
+  c.header("Cache-Control", "no-store");
+  c.header("Pragma", "no-cache");
+}
+
 function answer<E extends Env>(c: Context<E>, result: OAuthAnswer, noStore = false): Response {
-  if (noStore) {
-    c.header("Cache-Control", "no-store");
-    c.header("Pragma", "no-cache");
-  }
+  if (noStore) forbidCaching(c);
   if (result.status === 401) c.header("WWW-Authenticate", 'Basic realm="oauth"');
   return c.json(result.body, result.status);
 }

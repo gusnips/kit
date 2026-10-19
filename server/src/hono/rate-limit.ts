@@ -30,21 +30,22 @@ interface RateLimitCommon<E extends Env> {
   refuse: (hit: RefusedHit, scope: string) => Error;
 }
 
-export type RateLimitOptions<E extends Env = Env> = RateLimitCommon<E> &
-  (
-    | { store: MemoryWindowStore; whenStoreFails?: never; logger?: never }
-    | {
-        store: WindowStore;
-        /**
-         * `"allow"`, or the product's 503 to refuse with. There is no default: a limit that
-         * guards a promise allows, one that guards a bill refuses (see `hitWindow`).
-         */
-        whenStoreFails: "allow" | ((error: unknown, scope: string) => Error);
-        /** Where a store failure is written, allowed or refused. An allowed one is otherwise
-         *  silent, and a limiter that has quietly stopped limiting is the failure to catch. */
-        logger: Logger;
-      }
-  );
+/** Where a limit counts. A store that can fail comes with what an outage means. */
+export type RateLimitStore =
+  | { store: MemoryWindowStore; whenStoreFails?: never; logger?: never }
+  | {
+      store: WindowStore;
+      /**
+       * `"allow"`, or the product's 503 to refuse with. There is no default: a limit that
+       * guards a promise allows, one that guards a bill refuses (see `hitWindow`).
+       */
+      whenStoreFails: "allow" | ((error: unknown, scope: string) => Error);
+      /** Where a store failure is written, allowed or refused. An allowed one is otherwise
+       *  silent, and a limiter that has quietly stopped limiting is the failure to catch. */
+      logger: Logger;
+    };
+
+export type RateLimitOptions<E extends Env = Env> = RateLimitCommon<E> & RateLimitStore;
 
 /**
  * A fixed-window limit in front of the routes it is mounted on. It throws the product's own

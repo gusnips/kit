@@ -774,6 +774,18 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     kit suite's own fake, run through the same flows as Postgres, so adopters stop writing one
     each; it is a subpath of its own so nobody serves with it.
 
+    **The console routes answer `no-store`, and a Worker can hold the device limit (0.14.3).** The
+    first Worker adopter found all three gaps (2026-10-19). `/approve`'s `redirectTo` carries the
+    authorization code, and the console routes set no cache header, so the code could sit in a cache
+    between the API and the page; only that adopter set `no-store`, by hand. Every console answer
+    now carries `Cache-Control: no-store` and `Pragma: no-cache`, the pair the token route already
+    sent. The device limit counted in the process's memory, which on a Worker is one isolate among
+    many, so `oauthRoutes` takes `rateLimit`'s own store options (`RateLimitStore`): a store that
+    can fail comes with what an outage means. And a device key's name was English only, so
+    `createOAuth` takes `deviceKeyName`; the adopter had written a device route of its own to strip
+    the English half. Planted changes (no header, the store ignored, the name option ignored, the
+    name not cut to 60) each failed a test.
+
     **A document signs in with the method we share, not the one it prefers.** Through 0.13.0 a
     document whose `token_endpoint_auth_method` was not `none` was refused. ChatGPT's (read
     2026-10-19) prefers `private_key_jwt` and also lists `none` in

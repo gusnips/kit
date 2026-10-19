@@ -889,6 +889,188 @@ typecheck. BullMQ 5 brings its own ioredis 5, and its types refuse a version 6 c
 to 6 together. BullMQ 6 also dropped the `repeat` option on `add()`. `syncJobSchedulers` still
 removes a repeat that version 5 created, with its next run.
 
+## Runs that survive a restart
+
+An agent run can take minutes and cost money. When a deploy or a crash stops its process halfway,
+`/runs` makes the run either go on or end with a reason. It never stays "running" forever. The run
+is a row in Postgres, and a queue job carries only its id, so BullMQ and pg-boss both work.
+
+Add the two tables in a migration:
+
+```sql
+CREATE TABLE app.runs (
+  id uuid PRIMARY KEY,
+  root_id uuid NOT NULL,
+  parent_id uuid REFERENCES app.runs (id) ON DELETE CASCADE,
+  child_key text,
+  depth int NOT NULL DEFAULT 0,
+  kind text NOT NULL,
+  owner text NOT NULL,
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+  restart text NOT NULL DEFAULT 'fail' CHECK (restart IN ('fail', 'restart', 'resume')),
+  input json NOT NULL,
+  checkpoint json,
+  result json,
+  error json,
+  limits json NOT NULL DEFAULT '{}',
+  crashes int NOT NULL DEFAULT 0,
+  max_crashes int NOT NULL DEFAULT 5,
+  lease_token uuid,
+  lease_until timestamptz,
+  cancel_requested_at timestamptz,
+  cost_usd numeric(14, 6) NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  finished_at timestamptz,
+  CHECK ((parent_id IS NULL) = (child_key IS NULL)),
+  UNIQUE (parent_id, child_key)
+);
+CREATE INDEX runs_queued_idx ON app.runs (updated_at)
+  WHERE parent_id IS NULL AND status = 'queued';
+CREATE INDEX runs_leased_idx ON app.runs (lease_until)
+  WHERE parent_id IS NULL AND status = 'running';
+CREATE INDEX runs_root_idx ON app.runs (root_id);
+CREATE INDEX runs_finished_idx ON app.runs (finished_at)
+  WHERE parent_id IS NULL AND finished_at IS NOT NULL;
+
+CREATE TABLE app.run_events (
+  run_id uuid NOT NULL REFERENCES app.runs (id) ON DELETE CASCADE,
+  seq int NOT NULL,
+  type text NOT NULL,
+  data json,
+  at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, seq)
+);
+```
+
+The columns are `json`, not `jsonb`. `jsonb` reorders an object's keys, and a resumed transcript
+must send the provider the same bytes as before, or its prompt cache misses.
+
+Make the store, start a run, and drive it from a worker:
+
+```ts
+import { createRuns } from "@gusnips/server/runs";
+
+const runs = createRuns(pool, {
+  table: "app.runs",
+  events: "app.run_events",
+  onError: (error) => logger.error("[runs] failed", { error }),
+});
+
+const { id } = await runs.create({ kind: "report", owner: userId, input: { topic } });
+
+// In the worker, with the id from the job:
+await runs.drive(id, {
+  report: async (run) => {
+    run.emit("status", { step: "searching" });
+    const notes = await search(run.input, run.signal);
+    await run.save({ notes });
+    return await write(notes, run.signal);
+  },
+});
+```
+
+`drive` claims the run, calls the handler named by its `kind`, and records how it ended:
+`succeeded` with what the handler returned, or `failed` with `{ code: "handler", message }` when
+it threw. `onError` gets the thrown error too, with its stack. `drive` itself throws only when the
+database fails. So a job delivered twice does no harm: the second `drive` finds the run held or
+finished, and returns `"skipped"`.
+
+**When the worker dies.** A worker holds its run with a lease, renewed every 10 seconds. A lease
+that is not renewed runs out after 30. The next `drive` then takes the run over, counts a crash,
+and does what the run's `restart` says:
+
+- `fail`, the default: the run ends `failed` with code `interrupted`.
+- `restart`: the handler runs again from the start.
+- `resume`: the handler runs again, with `run.checkpoint` set to what it last passed to
+  `run.save`. Whatever it did after that save runs twice, so make those steps safe to repeat.
+  `run.resumed` is true, and `run.crashes` says how many times this happened.
+
+After 5 crashes (`maxCrashes`) the run ends `failed` with code `restart_limit`, so a run that kills
+its worker every time stops being retried.
+
+**A worker that comes back late changes nothing.** A process paused past its lease (a long garbage
+collection, a frozen VM) still has its handler running. Every `run.save` it makes throws, its
+events are dropped, and `run.signal` aborts with a `RunStopped` whose `code` is `"lost"`. Pass
+`run.signal` to every provider call, so the late handler stops paying for tokens.
+
+**Events.** `run.emit(type, data)` returns at once, and the appends run in order behind the work.
+`runs.tail(id, afterSeq, signal)` yields every event after `afterSeq`, then each new one, until the
+run finishes. Every way a run ends adds a last event, `end`, with its `status` and `error`. As a
+Server-Sent Events stream:
+
+```ts
+import { streamSSE } from "hono/streaming";
+
+app.get("/runs/:id/events", async (c) => {
+  // Check that the run belongs to the caller first. This module checks nothing.
+  const after = Number(c.req.header("last-event-id")) || 0;
+  return streamSSE(c, async (stream) => {
+    for await (const event of runs.tail(c.req.param("id"), after, c.req.raw.signal))
+      await stream.writeSSE({
+        id: String(event.seq),
+        event: event.type,
+        data: JSON.stringify(event.data),
+      });
+  });
+});
+```
+
+A client that reconnects sends its `Last-Event-ID`, and picks up after the last event it saw. A
+tail reads the table once a second, so an event can reach it up to a second late.
+
+**On BullMQ**, add the job after the transaction that created the run has committed, or a worker
+can take it before the row is there:
+
+```ts
+import { createQueue, createWorker } from "@gusnips/server/bullmq";
+
+const runQueue = createQueue<{ runId: string }>("runs", {
+  connection: redis,
+  onError,
+  defaultJobOptions: { attempts: 1 },
+});
+const worker = createWorker<{ runId: string }>(
+  "runs",
+  (job) => runs.drive(job.data.runId, handlers),
+  { connection: redis, onError },
+);
+
+await runQueue.add("run", { runId: id }, { jobId: id });
+```
+
+`attempts: 1`, because a retry of `drive` would only find what the first one left. A worker that
+dies is still covered: BullMQ re-runs its job 35 to 69 seconds later, and by then the lease has run
+out, so the re-run takes the run over. The `jobId` makes a second add a no-op while the job exists.
+
+**On pg-boss**, send the job inside the transaction that creates the run, so neither exists
+without the other:
+
+```ts
+await boss.createQueue("runs", { name: "runs", policy: "short" });
+await boss.work<{ runId: string }>("runs", async ([job]) => {
+  if (job) await runs.drive(job.data.runId, handlers);
+});
+
+// Inside your transaction, on its client:
+const { id } = await runs.create({ kind: "report", owner: userId, input: { topic } }, client);
+await boss.send(
+  "runs",
+  { runId: id },
+  {
+    db: { executeSql: (text, values) => client.query(text, values) },
+    singletonKey: id,
+    retryLimit: 0,
+  },
+);
+```
+
+The `short` policy keeps one waiting job per `singletonKey`, so a second send for the same run is
+dropped. Without `singletonKey` it would keep one waiting job for the whole queue. A duplicate
+would be harmless anyway, because only one `drive` can claim a run; the policy only saves work.
+
 ## A rate limit
 
 ```ts

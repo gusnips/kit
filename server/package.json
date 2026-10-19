@@ -61,6 +61,10 @@
     "./openapi": {
       "types": "./dist/openapi/index.d.ts",
       "default": "./dist/openapi/index.js"
+    },
+    "./runs": {
+      "types": "./dist/runs/index.d.ts",
+      "default": "./dist/runs/index.js"
     }
   },
   "types": "./dist/index.d.ts",

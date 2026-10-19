@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/react",
-  "version": "0.9.29",
+  "version": "0.9.30",
   "description": "The headless runtime under a Vite + React SPA: typed fetch client with single-flight refresh, auth store, query defaults, route guards, error boundary, stale-tab recovery, i18n bootstrap.",
   "type": "module",
   "license": "MIT",
@@ -49,6 +49,10 @@
     "./oauth": {
       "types": "./dist/oauth.d.ts",
       "default": "./dist/oauth.js"
+    },
+    "./keys": {
+      "types": "./dist/keys.d.ts",
+      "default": "./dist/keys.js"
     }
   },
   "types": "./dist/index.d.ts",

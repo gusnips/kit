@@ -2,8 +2,8 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
-// One config for the whole repo — eslint walks up from each workspace, so
-// `eslint src` inside any of the four packages resolves to this file.
+// One config for the whole repo: eslint walks up from each workspace, so
+// `eslint src` inside any package resolves to this file.
 export default tseslint.config(
   {
     ignores: ["**/dist/**", "**/node_modules/**"],

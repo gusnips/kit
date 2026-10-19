@@ -19,6 +19,9 @@ br/LICENSE
 cnpj/LICENSE
 react/LICENSE
 vite/LICENSE
+migrate/LICENSE
+server/LICENSE
+sdkgen/LICENSE
 
 # Internal: names private codebases. Stays on disk, out of the repo.
 ROADMAP.local.md

@@ -1,0 +1,371 @@
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { z } from "zod";
+import { type ValidationIssue, validationIssues } from "./index.ts";
+import { AppError, createAppError } from "./errors.ts";
+import { created, createErrorResponse, noContent, ok, paginated } from "./responses.ts";
+
+type Code =
+  | "VALIDATION_ERROR"
+  | "UNAUTHORIZED"
+  | "NOT_FOUND"
+  | "RATE_LIMIT_EXCEEDED"
+  | "INTERNAL_ERROR"
+  | "SERVICE_UNAVAILABLE"
+  | "GATEWAY_ERROR";
+
+const ERROR_STATUS = {
+  VALIDATION_ERROR: 400,
+  UNAUTHORIZED: 401,
+  NOT_FOUND: 404,
+  RATE_LIMIT_EXCEEDED: 429,
+  INTERNAL_ERROR: 500,
+  SERVICE_UNAVAILABLE: 503,
+  GATEWAY_ERROR: 502,
+} as const satisfies Record<Code, number>;
+
+const appError = createAppError<typeof ERROR_STATUS>(ERROR_STATUS);
+
+const errorResponse = createErrorResponse<Code>({
+  internal: { code: "INTERNAL_ERROR", message: "Something on our side failed" },
+  validation: { code: "VALIDATION_ERROR", message: "The request could not be read" },
+});
+
+describe("success helpers", () => {
+  it("wraps every 2xx body in { data }", () => {
+    expect(ok({ id: 1 })).toEqual({ status: 200, body: { data: { id: 1 } } });
+    expect(created({ id: 1 })).toEqual({ status: 201, body: { data: { id: 1 } } });
+    expect(noContent()).toEqual({ status: 204, body: null });
+  });
+
+  it("omits meta when there is none", () => {
+    expect(ok({ id: 1 }).body).not.toHaveProperty("meta");
+  });
+
+  it("computes hasMore from the page it actually returned", () => {
+    expect(paginated([1, 2], { total: 10, limit: 2, offset: 0 }).body.meta).toEqual({
+      total: 10,
+      limit: 2,
+      offset: 0,
+      hasMore: true,
+    });
+    expect(paginated([9, 10], { total: 10, limit: 2, offset: 8 }).body.meta?.hasMore).toBe(false);
+    expect(paginated([], { total: 0, limit: 20, offset: 0 }).body.meta?.hasMore).toBe(false);
+  });
+});
+
+describe("the error envelope", () => {
+  it("omits every optional field that was not set", () => {
+    expect(errorResponse(appError("NOT_FOUND", "Workspace not found")).body).toEqual({
+      error: { code: "NOT_FOUND", message: "Workspace not found" },
+    });
+  });
+
+  it("carries messageKey, params and details when they are set", () => {
+    const body = errorResponse(
+      appError("NOT_FOUND", "No such plan", {
+        messageKey: "serverErrors.notFound",
+        params: { id: "pro" },
+        details: { id: "pro", upgradeTo: "starter" },
+      }),
+    ).body;
+    expect(body.error.messageKey).toBe("serverErrors.notFound");
+    expect(body.error.params).toEqual({ id: "pro" });
+    expect(body.error.details).toEqual({ id: "pro", upgradeTo: "starter" });
+  });
+
+  it("folds a stated wait into an object details", () => {
+    const err = appError("RATE_LIMIT_EXCEEDED", "Too many requests", {
+      details: { limit: 60 },
+      retryAfterSecs: 30,
+    });
+    expect(errorResponse(err).body.error.details).toEqual({ limit: 60, retryAfterSecs: 30 });
+  });
+
+  it("folds it into an absent details", () => {
+    const err = appError("RATE_LIMIT_EXCEEDED", "Too many requests", { retryAfterSecs: 30 });
+    expect(errorResponse(err).body.error.details).toEqual({ retryAfterSecs: 30 });
+  });
+
+  it("hands an ARRAY details back untouched", () => {
+    const issues = [{ path: ["url"], code: "invalid_string" }];
+    const err = appError("RATE_LIMIT_EXCEEDED", "Too many requests", {
+      details: issues,
+      retryAfterSecs: 5,
+    });
+    const details = errorResponse(err).body.error.details;
+    expect(details).toEqual(issues);
+    expect(Array.isArray(details)).toBe(true);
+  });
+
+  it("hands a STRING details back untouched", () => {
+    const err = appError("RATE_LIMIT_EXCEEDED", "Spent", {
+      details: "month",
+      retryAfterSecs: 5,
+    });
+    expect(errorResponse(err).body.error.details).toBe("month");
+  });
+});
+
+describe("a validation failure is a 400 that reflects nothing back", () => {
+  const schema = z
+    .object({ days: z.enum(["7", "30"]), timeoutMs: z.number().max(30_000) })
+    .strict();
+
+  it("exports the safe issue projection for every door that validates input", () => {
+    const validationError = {
+      issues: [
+        {
+          path: ["items", 0, Symbol("field"), Symbol()],
+          code: "too_big",
+          maximum: 10,
+          minimum: 1,
+          received: "secret",
+          values: ["private", "schema"],
+          message: "Expected a private schema value",
+        },
+        { path: ["amount"], code: "too_big", maximum: 10n, minimum: "1" },
+      ],
+    } as const;
+    const projected: ValidationIssue[] = validationIssues(validationError);
+
+    expect(projected).toEqual([
+      { path: ["items", 0, "field", ""], code: "too_big", maximum: 10, minimum: 1 },
+      { path: ["amount"], code: "too_big" },
+    ]);
+    expect(() => JSON.stringify(projected)).not.toThrow();
+    expect(JSON.stringify(projected)).not.toContain("secret");
+    expect(JSON.stringify(projected)).not.toContain("private");
+  });
+
+  it("answers rather than throws when an issue arrives without a usable path", () => {
+    // The gate admits anything named ZodError with an array of issues, so an element that lost a
+    // field crossing a queue or a tool boundary reaches the projection. Throwing here throws
+    // inside the function whose whole job is to turn a thrown thing into an answer.
+    for (const issue of [{ code: "custom" }, null, { path: "amount", code: "too_big" }]) {
+      const answer = errorResponse({ name: "ZodError", issues: [issue] });
+      expect(answer.status).toBe(400);
+      expect(answer.body.error.details).toEqual([{ path: [], code: issue?.code ?? "" }]);
+    }
+  });
+
+  it("answers 400 with the path and the rule", () => {
+    const parsed = schema.safeParse({ days: "90", timeoutMs: 1 });
+    const answer = errorResponse(parsed.error);
+    expect(answer.status).toBe(400);
+    expect(answer.kind).toBe("client");
+    expect(answer.body.error.code).toBe("VALIDATION_ERROR");
+    expect(answer.body.error.details).toEqual([{ path: ["days"], code: "invalid_value" }]);
+  });
+
+  it("carries the BOUND a range failed against, because the bound is our published contract", () => {
+    const parsed = schema.safeParse({ days: "7", timeoutMs: 999_999 });
+    expect(errorResponse(parsed.error).body.error.details).toEqual([
+      { path: ["timeoutMs"], code: "too_big", maximum: 30_000 },
+    ]);
+  });
+
+  it("never reflects the rejected value or the keys the caller sent", () => {
+    const parsed = schema.safeParse({ days: "90", timeoutMs: 1, secretGuess: "admin" });
+    const details = JSON.stringify(errorResponse(parsed.error).body.error.details);
+    expect(details).not.toContain("90");
+    expect(details).not.toContain("secretGuess");
+    expect(details).not.toContain("admin");
+  });
+
+  it("recognizes a ZodError structurally, with no zod import of its own", () => {
+    const hand = {
+      name: "ZodError",
+      issues: [{ path: ["a"], code: "custom", received: "sekrit" }],
+    };
+    const answer = errorResponse(hand);
+    expect(answer.status).toBe(400);
+    expect(JSON.stringify(answer.body.error.details)).not.toContain("sekrit");
+  });
+});
+
+describe("an AppError under 500 is answered as itself", () => {
+  it("keeps the status, the code and the message", () => {
+    const answer = errorResponse(appError("NOT_FOUND", "Workspace not found"));
+    expect(answer).toMatchObject({
+      status: 404,
+      kind: "client",
+      body: { error: { code: "NOT_FOUND", message: "Workspace not found" } },
+    });
+  });
+
+  it("names the scheme it wants on a 401", () => {
+    expect(errorResponse(appError("UNAUTHORIZED", "Sign in")).headers).toEqual({
+      "WWW-Authenticate": "Bearer",
+    });
+  });
+
+  it("names where to sign in on a 401 when given the challenge", () => {
+    const challenge = 'Bearer resource_metadata="https://api.example.com/.well-known/x"';
+    const answer = createErrorResponse<Code>({
+      internal: { code: "INTERNAL_ERROR", message: "Something on our side failed" },
+      validation: { code: "VALIDATION_ERROR", message: "The request could not be read" },
+      challenge,
+    })(appError("UNAUTHORIZED", "Sign in"));
+    expect(answer.headers).toEqual({ "WWW-Authenticate": challenge });
+  });
+
+  it("says a refusal does NOT clear by waiting, and sends no Retry-After for it", () => {
+    // A concurrency slot frees when another job finishes, and a cap on live objects clears by
+    // archiving one. Neither is a wait a server can state, and both are 429s in the fleet.
+    const answer = errorResponse(
+      appError("RATE_LIMIT_EXCEEDED", "Three jobs already running — wait for one to finish", {
+        retryAfterSecs: null,
+      }),
+    );
+    expect(answer.headers).not.toHaveProperty("Retry-After");
+    expect(answer.body.error.details).toEqual({ retryAfterSecs: null });
+  });
+
+  it("states a wait in the header as well as in details", () => {
+    const answer = errorResponse(
+      appError("RATE_LIMIT_EXCEEDED", "Slow down", { retryAfterSecs: 45 }),
+    );
+    expect(answer.headers["Retry-After"]).toBe("45");
+    expect(answer.body.error.details).toEqual({ retryAfterSecs: 45 });
+  });
+
+  it("states a wait in whole seconds, never below zero", () => {
+    // `Retry-After` is 1*DIGIT. A wait from a window that already reset is negative, and one
+    // divided out of milliseconds is a fraction: round up, and a past reset is now.
+    const wait = (retryAfterSecs: number) =>
+      errorResponse(appError("RATE_LIMIT_EXCEEDED", "Slow down", { retryAfterSecs }));
+    expect(wait(1.2).headers["Retry-After"]).toBe("2");
+    expect(wait(1.2).body.error.details).toEqual({ retryAfterSecs: 2 });
+    expect(wait(-3).headers["Retry-After"]).toBe("0");
+    expect(wait(-3).body.error.details).toEqual({ retryAfterSecs: 0 });
+    // Not a time at all: no header, and the body says what JSON would have written anyway.
+    expect(wait(Number.NaN).headers).not.toHaveProperty("Retry-After");
+    expect(wait(Number.POSITIVE_INFINITY).body.error.details).toEqual({ retryAfterSecs: null });
+  });
+});
+
+describe("the answer keeps the key union it was bound with", () => {
+  type Key = "errors.notFound" | "errors.internal";
+  const keyed = createErrorResponse<Code, Key>({
+    internal: { code: "INTERNAL_ERROR", message: "Failed", messageKey: "errors.internal" },
+    validation: { code: "VALIDATION_ERROR", message: "Unreadable" },
+  });
+  const keyedError = createAppError<typeof ERROR_STATUS, Key>(ERROR_STATUS);
+
+  it("so the body fits a slot typed with it", () => {
+    // A stream frame or a job's stored failure is typed with the product's keys. Typed `string`,
+    // the body needed a cast at every one of those sites.
+    const body = keyed(keyedError("NOT_FOUND", "Gone", { messageKey: "errors.notFound" })).body;
+    expectTypeOf(body.error.messageKey).toEqualTypeOf<Key | undefined>();
+    expect(body.error.messageKey).toBe("errors.notFound");
+    expect(keyed(new Error("boom")).body.error.messageKey).toBe("errors.internal");
+  });
+});
+
+describe("the 5xx mask", () => {
+  it("replaces the message of the one code that may carry internals", () => {
+    const answer = errorResponse(
+      appError("INTERNAL_ERROR", 'duplicate key value violates "users_email_key"'),
+    );
+    expect(answer.status).toBe(500);
+    expect(answer.kind).toBe("server");
+    expect(answer.body.error.message).toBe("Something on our side failed");
+    expect(JSON.stringify(answer.body)).not.toContain("users_email_key");
+  });
+
+  it("drops a masked 5xx's details entirely, whatever was put in them", () => {
+    // The trap this closes: a driver error handed straight to `details`. Postgres writes the
+    // ENTIRE failing row into its `detail` field on a CHECK or NOT NULL violation — every
+    // column, values included — so a caught driver object in `details` is a row on the wire.
+    const err = appError("INTERNAL_ERROR", "insert failed", {
+      details: { detail: "Failing row contains (someone@example.com, 4242424242424242)." },
+    });
+    const answer = errorResponse(err);
+    expect(answer.body.error).not.toHaveProperty("details");
+    expect(JSON.stringify(answer)).not.toContain("4242");
+  });
+
+  it("lets an authored 5xx through, because it is what says whether to retry", () => {
+    const answer = errorResponse(appError("SERVICE_UNAVAILABLE", "Metering is unavailable"));
+    expect(answer.status).toBe(503);
+    expect(answer.body.error.message).toBe("Metering is unavailable");
+  });
+
+  it("keeps the STATUS when it masks the message", () => {
+    const all = createErrorResponse<Code>({
+      internal: { code: "INTERNAL_ERROR", message: "Something on our side failed" },
+      validation: { code: "VALIDATION_ERROR", message: "The request could not be read" },
+      maskAll: true,
+    });
+    const answer = all(appError("GATEWAY_ERROR", "upstream said: connection reset by peer"));
+    expect(answer.status).toBe(502);
+    expect(answer.body.error.message).toBe("Something on our side failed");
+    expect(answer.body.error.code).toBe("INTERNAL_ERROR");
+  });
+
+  it("lets `expose` opt an authored sentence back through maskAll", () => {
+    const all = createErrorResponse<Code>({
+      internal: { code: "INTERNAL_ERROR", message: "Something on our side failed" },
+      validation: { code: "VALIDATION_ERROR", message: "The request could not be read" },
+      maskAll: true,
+    });
+    const err = appError("SERVICE_UNAVAILABLE", "Payments are not set up here", { expose: true });
+    expect(all(err).body.error.message).toBe("Payments are not set up here");
+  });
+
+  it("drops a 5xx's details on its own knob, exposed or not", () => {
+    const quiet = createErrorResponse<Code>({
+      internal: { code: "INTERNAL_ERROR", message: "Something on our side failed" },
+      validation: { code: "VALIDATION_ERROR", message: "The request could not be read" },
+      maskDetails: true,
+    });
+    const err = appError("SERVICE_UNAVAILABLE", "A dependency is down", {
+      details: { pg: "connection refused at 10.0.0.4:5432" },
+    });
+    expect(quiet(err).body.error.message).toBe("A dependency is down");
+    expect(quiet(err).body.error).not.toHaveProperty("details");
+    expect(JSON.stringify(quiet(err))).not.toContain("10.0.0.4");
+  });
+
+  it("keeps a 5xx's details by default, because they name which dependency is down", () => {
+    const err = appError("SERVICE_UNAVAILABLE", "Not ready", {
+      details: { pg: "down", redis: "ok" },
+    });
+    expect(errorResponse(err).body.error.details).toEqual({ pg: "down", redis: "ok" });
+  });
+
+  it("leaves a 4xx's details alone whatever the mask says", () => {
+    const quiet = createErrorResponse<Code>({
+      internal: { code: "INTERNAL_ERROR", message: "Something on our side failed" },
+      validation: { code: "VALIDATION_ERROR", message: "The request could not be read" },
+      maskAll: true,
+      maskDetails: true,
+    });
+    const err = appError("NOT_FOUND", "No such plan", { details: { id: "pro" } });
+    expect(quiet(err).body.error.details).toEqual({ id: "pro" });
+    expect(quiet(err).body.error.message).toBe("No such plan");
+  });
+});
+
+describe("a throw nobody raised on purpose", () => {
+  it("answers a generic 500 and never repeats what it caught", () => {
+    const answer = errorResponse(new Error("ECONNREFUSED redis://10.0.0.4:6379"));
+    expect(answer.status).toBe(500);
+    expect(answer.kind).toBe("unexpected");
+    expect(answer.body.error.code).toBe("INTERNAL_ERROR");
+    expect(JSON.stringify(answer)).not.toContain("10.0.0.4");
+  });
+
+  it("does the same for a plain object a driver rejected with", () => {
+    const answer = errorResponse({ code: "PGRST205", message: 'Could not find table "app.jobs"' });
+    expect(answer.status).toBe(500);
+    expect(answer.kind).toBe("unexpected");
+    expect(JSON.stringify(answer)).not.toContain("app.jobs");
+  });
+
+  it("separates a 5xx we raised from one that escaped", () => {
+    expect(errorResponse(appError("INTERNAL_ERROR", "we broke it")).kind).toBe("server");
+    expect(errorResponse(new AppError(500, "INTERNAL_ERROR", "we broke it")).kind).toBe("server");
+    expect(errorResponse("a string nobody expected").kind).toBe("unexpected");
+  });
+});

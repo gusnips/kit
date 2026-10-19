@@ -1,5 +1,5 @@
 {
-  "name": "frontkit-workspace",
+  "name": "kit-workspace",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.2",
@@ -13,14 +13,17 @@
     "br",
     "cnpj",
     "react",
-    "vite"
+    "vite",
+    "migrate",
+    "sdkgen",
+    "server"
   ],
   "scripts": {
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
-    "typecheck": "bun run --filter '*' typecheck",
-    "lint": "eslint tokens http locale br cnpj react vite",
-    "purity": "bun run scripts/check-purity.ts",
+    "typecheck": "bun run --filter '*' typecheck && tsc -p tsconfig.scripts.json",
+    "lint": "eslint tokens http locale br cnpj react vite migrate sdkgen server scripts",
+    "purity": "bun run scripts/check-purity.ts && bun run --filter '@gusnips/server' purity",
     "exports": "bun run scripts/check-exports.ts",
     "release:check": "bun run scripts/check-release.ts",
     "format": "prettier --write .",
@@ -29,6 +32,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@types/node": "^24.12.0",
     "eslint": "^9.17.0",
     "eslint-plugin-react-hooks": "^7.0.0",
     "prettier": "^3.4.2",

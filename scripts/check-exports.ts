@@ -28,10 +28,21 @@
  * Run: bun run scripts/check-exports.ts   (after a build — the gate does that first)
  */
 import { readFile, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const ROOT = join(import.meta.dirname, "..");
-const PACKAGES = ["tokens", "http", "locale", "br", "cnpj", "react", "vite"];
+const PACKAGES = [
+  "tokens",
+  "http",
+  "locale",
+  "br",
+  "cnpj",
+  "react",
+  "vite",
+  "migrate",
+  "sdkgen",
+  "server",
+];
 
 interface PackageJson {
   name: string;
@@ -70,6 +81,8 @@ async function bareImports(
   if (source === null) return found;
 
   for (const [, specifier] of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+    // The pattern's one group always captures; this only tells the compiler so.
+    if (specifier === undefined) continue;
     if (specifier.startsWith(".")) await bareImports(resolve(dirname(abs), specifier), seen, found);
     else found.add(specifier);
   }

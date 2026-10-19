@@ -2,7 +2,7 @@
 /**
  * Platform-purity check for `@gusnips/server`.
  *
- * Adapted from the frontend kit's, which exists because **tsc cannot promise this**: a
+ * Adapted from the frontend packages' check, which exists because **tsc cannot promise this**: a
  * root-level `@types/node` is visible to every workspace, so a stray `import { randomBytes }
  * from "node:crypto"` typechecks fine and then fails to import inside a Cloudflare Worker.
  * Only reading the source catches it.

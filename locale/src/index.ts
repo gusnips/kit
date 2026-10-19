@@ -9,7 +9,7 @@
  *
  * Zero dependencies and its own package, on purpose. An API server reads `asLocale` at its edges.
  * Measured across six repos, that plus the locale list is ALL a server uses. A server depending on
- * a package named "react" is a smell even when it costs nothing at runtime. Nothing in frontkit
+ * a package named "react" is a smell even when it costs nothing at runtime. Nothing in this repo
  * depends on this one, so it is a leaf: no version of it can pin a sibling.
  */
 

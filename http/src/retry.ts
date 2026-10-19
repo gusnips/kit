@@ -1,7 +1,7 @@
 /**
  * `@gusnips/http/retry`: whether a failed request is worth a second attempt, and when.
  *
- * This is frontkit's invariant 8, one layer down from `@gusnips/react`, so a zero-dependency SDK
+ * This is AGENTS.md's invariant 8, one layer down from `@gusnips/react`, so a zero-dependency SDK
  * can follow the same rule as the app: it imports nothing, and a generator can copy the file
  * into an SDK whole. Five SDKs in one fleet each wrote their own, and each missed part of it:
  * none retried a 408, none read an explicit `retryAfterSecs: null`, three read the body's wait
@@ -110,7 +110,7 @@ export function retryAfterSecs(error: unknown): number | null {
  *
  * Both forms round UP. A date names a whole second and the clock is somewhere inside the one
  * before, so rounding to nearest sends a retry up to half a second early, into the limiter that
- * refused it, about half the time. A wait until you are allowed rounds up; the server kit's
+ * refused it, about half the time. A wait until you are allowed rounds up; `@gusnips/server`'s
  * webhook sender has always read it that way. "1.5" is not the RFC's seconds form, but what it
  * asks for is plain, so it reads as 2.
  */

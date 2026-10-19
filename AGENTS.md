@@ -545,8 +545,8 @@ pin them; if one fails, a lesson is being un-learned.
    **`@gusnips/react/supabase` exports it as `isAuthOutage`**, because five adopters had written
    those same four tokens by hand and a sixth was about to — migration 2's rule, arriving for the
    third time. Only the client half: several of the copies live in an `apps/api` or a
-   `packages/server`, and a server must not depend on a package named react. That half belongs to
-   the server kit, which already re-exports the vendor's predicate and needs the clause beside it.
+   `packages/server`, and a server must not depend on a package named react. That half is
+   `isAuthOutage` in `@gusnips/server/supabase`, the vendor's predicate with the clause beside it.
 
    **And exporting it moved the hazard: `isAuthOutage(null)` answered true.** Inside the package
    that was never reachable — `reachedAuth` filters with `error === null ||` before it asks — so a
@@ -673,7 +673,7 @@ pin them; if one fails, a lesson is being un-learned.
    **And a reading that came from the other end of the fleet rather than from a donor: a refusal
    can state that waiting never helps AT ALL.** For a limit no amount of time clears — a
    concurrency slot that frees when somebody else's job ends, a cap on live objects that clears
-   by archiving one — the server kit answers with an explicit body `retryAfterSecs` of `null`,
+   by archiving one — `@gusnips/server` answers with an explicit body `retryAfterSecs` of `null`,
    and deliberately no header, because a `Retry-After` stating no time is worse than none. Its own words for why
    that is a value and not an omission: **"an omission is invisible in a diff; a `null` is a
    claim somebody has to read."** This package could not read it. `retryAfterSecs` answered

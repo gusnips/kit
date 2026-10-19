@@ -5,9 +5,9 @@
   "type": "module",
   "license": "MIT",
   "author": "Gustavo Salomé",
-  "homepage": "https://github.com/gusnips/serverkit/tree/main/sdkgen#readme",
+  "homepage": "https://github.com/gusnips/kit/tree/main/sdkgen#readme",
   "bugs": {
-    "url": "https://github.com/gusnips/serverkit/issues"
+    "url": "https://github.com/gusnips/kit/issues"
   },
   "exports": {
     ".": {
@@ -63,7 +63,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gusnips/serverkit.git",
+    "url": "git+https://github.com/gusnips/kit.git",
     "directory": "sdkgen"
   }
 }

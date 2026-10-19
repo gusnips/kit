@@ -5,9 +5,9 @@
   "type": "module",
   "license": "MIT",
   "author": "Gustavo Salom\u00e9",
-  "homepage": "https://github.com/gusnips/serverkit/tree/main/server#readme",
+  "homepage": "https://github.com/gusnips/kit/tree/main/server#readme",
   "bugs": {
-    "url": "https://github.com/gusnips/serverkit/issues"
+    "url": "https://github.com/gusnips/kit/issues"
   },
   "exports": {
     ".": {
@@ -155,7 +155,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gusnips/serverkit.git",
+    "url": "git+https://github.com/gusnips/kit.git",
     "directory": "server"
   }
 }

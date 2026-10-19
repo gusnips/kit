@@ -263,7 +263,7 @@ Infinity` default turns a typo'd `DATABASE_URL` into a boot that hangs instead o
 
 31. **A peer used only for its types is optional, and a sentence saying so is not the
     declaration.** `@gusnips/http` was a REQUIRED peer while being imported in exactly two files,
-    both `import type`. Verified the way frontkit's invariant 15 prescribes — against the BUILT
+    both `import type`. Verified the way the root file's invariant 15 prescribes: against the BUILT
     output, never the source: zero occurrences in any emitted `.js`, and only `.d.ts` references,
     because types erase.
 

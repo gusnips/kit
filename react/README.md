@@ -902,4 +902,4 @@ about it.
 `@tanstack/react-query`, `i18next` and `react-i18next` are optional and stay in the main entry,
 because only their types are used and types erase.
 
-MIT · part of [frontkit](https://github.com/gusnips/frontkit)
+MIT · part of [kit](https://github.com/gusnips/kit)

@@ -329,4 +329,4 @@ export default defineConfig(
 );
 ```
 
-MIT · part of [frontkit](https://github.com/gusnips/frontkit)
+MIT · part of [kit](https://github.com/gusnips/kit)

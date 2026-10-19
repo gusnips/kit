@@ -895,7 +895,7 @@ first import after Redis came back went through.
 
 `/health` asks Redis too, with `pingRedis`, and the API closes its connection with `quitRedis`
 before Postgres when it stops. With Redis stopped, `/health` answered 503 `Redis is not answering`.
-[Redis](https://github.com/gusnips/serverkit/blob/main/server/README.md#redis).
+[Redis](server/README.md#redis).
 
 ### A job can run twice
 
@@ -1071,7 +1071,7 @@ are safe to run twice, as imports are.
 **Recurring jobs get a queue of their own.** `syncJobSchedulers` removes every schedule on its
 queue that its list does not name. Leave out `tz` and the typecheck fails, because a cron pattern
 with no time zone runs on the server's clock.
-[Background jobs](https://github.com/gusnips/serverkit/blob/main/server/README.md#background-jobs).
+[Background jobs](server/README.md#background-jobs).
 
 ### Stopping the worker
 
@@ -1527,8 +1527,8 @@ Error: 2 endpoint(s) answer with no guard running in front of them:
 ```
 
 It passes once `isPublic` is `underAny(["/health", "/unsubscribe"])`.
-[Sending mail](https://github.com/gusnips/serverkit/blob/main/server/README.md#sending-mail),
-[the unsubscribe headers](https://github.com/gusnips/serverkit/blob/main/server/README.md#the-unsubscribe-headers).
+[Sending mail](server/README.md#sending-mail),
+[the unsubscribe headers](server/README.md#the-unsubscribe-headers).
 
 ### Run it
 
@@ -1745,7 +1745,7 @@ Error: 3 endpoint(s) answer with no guard running in front of them:
   POST /webhooks
 ```
 
-[A URL somebody else gave you](https://github.com/gusnips/serverkit/blob/main/server/README.md#a-url-somebody-else-gave-you).
+[A URL somebody else gave you](server/README.md#a-url-somebody-else-gave-you).
 
 ### Sending one
 
@@ -1989,7 +1989,7 @@ that goes through sets the count back to 0.
 
 The owner sees `"enabled": false` in `GET /webhooks`, and adds the address again to turn it back
 on. The log line is where a mail to them would go.
-[Sending one, and trying again](https://github.com/gusnips/serverkit/blob/main/server/README.md#sending-one-and-trying-again).
+[Sending one, and trying again](server/README.md#sending-one-and-trying-again).
 
 ### Receiving one
 
@@ -2053,7 +2053,7 @@ with the same `id`. So the receiver answers 2xx again and does nothing.
 `EADDRINUSE`.
 
 Supabase Auth's hooks use a second format, Standard Webhooks. `verifyStandardWebhook` checks it.
-[A webhook](https://github.com/gusnips/serverkit/blob/main/server/README.md#a-webhook).
+[A webhook](server/README.md#a-webhook).
 
 ### Run it
 
@@ -2325,7 +2325,7 @@ export default defineConfig({
 
 To serve the reference in Portuguese too, pass `createOpenApiResponder` one function for each
 language.
-[A reference for your API](https://github.com/gusnips/serverkit/blob/main/server/README.md#a-reference-for-your-api).
+[A reference for your API](server/README.md#a-reference-for-your-api).
 
 A typed client built from this file, with `@gusnips/sdkgen`, comes in a later part.
 
@@ -2626,7 +2626,7 @@ second, the whole `timeoutMs`, because that connection holds a command until Red
 **Choose what a Redis outage means.** `whenStoreFails` has no default. `"allow"` fits this limit:
 refusing every user over a Redis blip is worse than a minute with no limit. A limit that guards a
 bill, such as a form that sends mail to strangers, passes its 503 instead.
-[A rate limit](https://github.com/gusnips/serverkit/blob/main/server/README.md#a-rate-limit).
+[A rate limit](server/README.md#a-rate-limit).
 
 ### An MCP door
 
@@ -2768,7 +2768,7 @@ agent.
 
 **No web page may call it.** A request with an `Origin` header got a 403, and a GET got a 405.
 Agents and scripts send no `Origin`.
-[An MCP door](https://github.com/gusnips/serverkit/blob/main/server/README.md#an-mcp-door).
+[An MCP door](server/README.md#an-mcp-door).
 
 ### The reference
 

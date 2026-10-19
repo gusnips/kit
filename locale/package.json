@@ -5,9 +5,9 @@
   "type": "module",
   "license": "MIT",
   "author": "Gustavo Salomé",
-  "homepage": "https://github.com/gusnips/frontkit/tree/main/locale#readme",
+  "homepage": "https://github.com/gusnips/kit/tree/main/locale#readme",
   "bugs": {
-    "url": "https://github.com/gusnips/frontkit/issues"
+    "url": "https://github.com/gusnips/kit/issues"
   },
   "exports": {
     ".": {
@@ -67,7 +67,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gusnips/frontkit.git",
+    "url": "git+https://github.com/gusnips/kit.git",
     "directory": "locale"
   }
 }

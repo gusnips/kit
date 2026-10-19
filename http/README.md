@@ -153,4 +153,4 @@ server stated is never moved.
 `@gusnips/react` retries react-query on this same rule, so an SDK and the app that uses it make
 the same call.
 
-MIT · part of [frontkit](https://github.com/gusnips/frontkit)
+MIT · part of [kit](https://github.com/gusnips/kit)

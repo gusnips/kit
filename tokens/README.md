@@ -114,4 +114,4 @@ Under reduced motion it turns slower and keeps turning. The `0.01ms` clamp above
 it, so the ring says `!important` and beats the clamp by being more specific than `*`. A frozen
 ring reads as a hang, and the ring is the only sign that a press was heard.
 
-MIT · part of [frontkit](https://github.com/gusnips/frontkit)
+MIT · part of [kit](https://github.com/gusnips/kit)

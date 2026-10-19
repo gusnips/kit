@@ -424,7 +424,7 @@ log. `validateEnv` checks, but it does not change the types, so `env` reads each
 as a `string`.
 
 It can also check that a secret is long enough, and that related variables are set together:
-[the environment](https://github.com/gusnips/serverkit/blob/main/server/README.md#the-environment).
+[the environment](server/README.md#the-environment).
 
 ### Log
 
@@ -440,7 +440,7 @@ It writes one JSON line per event to stdout.
 **Pass the error itself**, as in `logger.error("save failed", { error })`, never `String(error)`.
 The logger writes the message, the stack and the cause, and hides the values of keys like
 `password`, `token` and `authorization`.
-[Logging a failure](https://github.com/gusnips/serverkit/blob/main/server/README.md#logging-a-failure).
+[Logging a failure](server/README.md#logging-a-failure).
 
 ### One shape for every refusal
 
@@ -491,8 +491,8 @@ answers 429 must also say how long to wait: leave out `retryAfterSecs`, and Type
 `@gusnips/http` declares that shape once, and the API, its tests and the web's client all read it
 from there. `isApiError<ErrorCode>(body)` is true for an error body, and then `body.error.code` is
 one of your codes. The API's test below uses it.
-[Refusing a request](https://github.com/gusnips/serverkit/blob/main/server/README.md#refusing-a-request),
-[turning a throw into an answer](https://github.com/gusnips/serverkit/blob/main/server/README.md#turning-a-throw-into-an-answer),
+[Refusing a request](server/README.md#refusing-a-request),
+[turning a throw into an answer](server/README.md#turning-a-throw-into-an-answer),
 [the envelope](http/README.md#the-envelope).
 
 ### The app, and a health check
@@ -558,8 +558,8 @@ Anything else a route throws skips it: the connection drops with no answer, and 
 reports a CORS error, which sends you looking in the wrong place. The boundary wraps such a throw
 in an `Error`. `apiSecureHeaders` goes above the boundary, because a middleware below it never gets
 to add its headers when such a throw passes through.
-[Hono](https://github.com/gusnips/serverkit/blob/main/server/README.md#hono),
-[the headers on every answer](https://github.com/gusnips/serverkit/blob/main/server/README.md#the-headers-on-every-answer).
+[Hono](server/README.md#hono),
+[the headers on every answer](server/README.md#the-headers-on-every-answer).
 
 ### Postgres and migrations
 
@@ -583,7 +583,7 @@ export const pool = createPgPool({
 open, and with no listener Node turns that into a crash. The pool also stops waiting for a free
 connection after 10 seconds. Plain `pg` waits forever: with ten slow queries running, every
 request after them hangs with no error.
-[Postgres](https://github.com/gusnips/serverkit/blob/main/server/README.md#postgres).
+[Postgres](server/README.md#postgres).
 
 A migration is a `.sql` file in `apps/api/migrations`:
 
@@ -620,7 +620,7 @@ schema and its own `app.schema_migrations` table the first time.
 it stays. To undo a change, write a new file. The runner also refuses to apply anything to a
 database that is not on your machine unless you pass `--yes`, because a laptop's `.env` sometimes
 points at production.
-[@gusnips/migrate](https://github.com/gusnips/serverkit/blob/main/migrate/README.md).
+[@gusnips/migrate](migrate/README.md).
 
 ### Who is asking
 
@@ -660,7 +660,7 @@ export const requireUser = guard(
 out. If Supabase is down and the API answers 401, everyone who makes a request in that minute is
 signed out. `isAuthOutage` tells the two apart, so the API answers 503, and the web retries. We
 made the local stand-in answer 500, 503 and 507, then stopped it: the API answered 503 each time.
-[Supabase Auth](https://github.com/gusnips/serverkit/blob/main/server/README.md#supabase-auth).
+[Supabase Auth](server/README.md#supabase-auth).
 
 The rest of `app.ts` puts the guard in front of the notes routes:
 
@@ -761,7 +761,7 @@ Error: 2 endpoint(s) answer with no guard running in front of them:
   POST /notes
 ```
 
-[The guard check](https://github.com/gusnips/serverkit/blob/main/server/README.md#the-guard-check).
+[The guard check](server/README.md#the-guard-check).
 
 ## Running the API
 
@@ -919,7 +919,7 @@ test("a deploy stops the API before anything kills it", () => {
 It doubles the grace because the server step can wait it out twice while a stream is open (seen
 on Bun 1.3.8). Set `kill_timeout` to `20_000` and the test fails with
 `expected 25000 to be less than 20000`.
-[Stopping for a deploy](https://github.com/gusnips/serverkit/blob/main/server/README.md#stopping-for-a-deploy).
+[Stopping for a deploy](server/README.md#stopping-for-a-deploy).
 
 ## The web app
 
@@ -1565,6 +1565,6 @@ It runs six tasks: the three typechecks, the two test suites, and the web build.
   is done, trying again, and checking one you receive.
 - [An OpenAPI reference](GUIDE-2.md#an-openapi-reference): one file that lists every route, built
   from the schemas the routes check. An SDK built from it comes later:
-  [@gusnips/sdkgen](https://github.com/gusnips/serverkit/blob/main/sdkgen/README.md).
+  [@gusnips/sdkgen](sdkgen/README.md).
 - [A public API](GUIDE-2.md#a-public-api): keys a user's own code sends, a limit on how many
   requests each user sends in a minute, and an MCP door for AI agents.

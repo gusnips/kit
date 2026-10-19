@@ -1270,13 +1270,20 @@ await db.insert({ keyHash: hashApiKey(key), prefix: displayPrefix(key) }); // "a
 
 - **Store the hash and the display prefix, never the key.** The hash is SHA-256 of the whole key,
   64 hex characters, and a request's key is looked up by it. The display prefix is the first 12
-  characters, enough to tell keys apart in a list.
+  characters, enough to tell keys apart in a list. If your rows already keep another length, pass
+  it as `displayLength`.
 - **Check the shape before the lookup.** `looksLikeApiKey` says the token starts with your prefix,
   so a session token sent to the key door can be told it is at the wrong door.
   `isWellFormedApiKey` says it is exactly what `generateApiKey` mints, so a typo costs no
   database read.
 - **Keys you minted by hand keep working**, if they are your prefix and 16 random bytes in
-  lowercase hex, hashed with SHA-256: the same key gives the same hash.
+  lowercase hex, hashed with SHA-256: the same key gives the same hash. Keys minted as 24 random
+  bytes in base64url work too, with `encoding: "base64url"`:
+
+  ```ts
+  createApiKeyCodec({ prefix: "ac_", encoding: "base64url" }); // "ac_" + 32 of A-Z a-z 0-9 - _
+  ```
+
 - The prefix is a literal: a `.` in it matches only a dot. An empty prefix throws.
 
 Where keys are stored, who owns them, what they may do and how many one account may hold stay in

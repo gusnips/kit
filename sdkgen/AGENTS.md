@@ -1,15 +1,15 @@
 Rules for `@gusnips/sdkgen`. Layout, commands, publishing and house rules are in the root
 `AGENTS.md`. The server invariants run across three files: 1 to 20 in `migrate/AGENTS.md`, 21 to
-50 in `server/AGENTS.md`, 51 to 54 here.
+52 in `server/AGENTS.md`, 53 to 56 here.
 
-# Invariants 51 to 54, for `@gusnips/sdkgen`
+# Invariants 53 to 56, for `@gusnips/sdkgen`
 
 Five backends each wrote an SDK generator, 426 to 616 lines each and 2,517 in all. What they share
 is the reader, the schema writer and the writer, and those came across with every copy's fixes
 merged. The method loop and the transport under it came second: the loop was the same in all five
 once the product's choices (doc text, a spec field, hand-written members) became options.
 
-51. **A schema the writer does not understand throws. It never becomes `unknown`.** A wrong
+53. **A schema the writer does not understand throws. It never becomes `unknown`.** A wrong
     `unknown` in a published SDK compiles for everyone who installs it and tells none of them. The
     writer returns `unknown` only where the schema itself allows any value (`{}`, `true`, the
     values of a bare `object`), and refuses `allOf`, `$ref` and anything else it would have to guess at. The
@@ -17,7 +17,7 @@ once the product's choices (doc text, a spec field, hand-written members) became
     a boolean schema and a tuple in one. `typeNames` reads names inside a generic, where one copy
     split on `|` and missed `JobDto` in `V1ListPage<JobDto>[]`.
 
-52. **The reader keeps every line where it was.** It blanks comments and strings to read the
+54. **The reader keeps every line where it was.** It blanks comments and strings to read the
     structure, then copies the ORIGINAL lines, so the two texts must match line for line. All five
     copies broke that, in four ways, and none had a test for any of them:
     - an escape inside a string dropped its escaped character, or blanked it to a space, so a
@@ -53,7 +53,7 @@ once the product's choices (doc text, a spec field, hand-written members) became
     than an adapter, because `liftContract` returns one string, so a caller cannot tell afterwards
     which declarations were roots.
 
-53. **The output goes through the repo's own prettier before it is compared.** The generated files
+55. **The output goes through the repo's own prettier before it is compared.** The generated files
     are checked in, so the generator's `--check` and `prettier --check` must never disagree about
     one file. A file that cannot be read for a reason other than not existing throws rather than
     reading as stale, because "stale" would send someone to regenerate over a permission error.
@@ -67,7 +67,7 @@ once the product's choices (doc text, a spec field, hand-written members) became
     it. None of its operations needed it, so its output did not change, and the day one does, its
     generator now stops and names the type instead of publishing `unknown`.
 
-54. **The transport asks the retry rule about the answer, and a write is repeatable only with a key
+56. **The transport asks the retry rule about the answer, and a write is repeatable only with a key
     the server reads.** Of the five SDKs, three decided from their own error class's `retryAfter`,
     a number or nothing, so a server's explicit `details.retryAfterSecs: null` never reached the
     decision; two read the body's wait before the `Retry-After` header and read the header only as

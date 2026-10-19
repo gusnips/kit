@@ -415,6 +415,78 @@ Pass the app's own public rule, never a second list kept for the test. An exempt
 else reads is the next thing to drift. It also fails a guard that runs in front of nothing, and
 an app with no endpoints, so the check cannot pass by asking nothing.
 
+### One route per operation
+
+When your API is a list of operations, `restRoutes` mounts each one and reads its input:
+
+```ts
+import { restRoutes } from "@gusnips/server/hono";
+
+app.route(
+  "/v1",
+  restRoutes(
+    OPERATIONS.map((op) => ({
+      method: op.method, // "get", "post", "put", "patch" or "delete"
+      path: op.path, // "/things/:id"
+      status: op.status, // 200 by default; 201, 202 or 204
+      before: op.keyless ? [] : [requireApiKey],
+      run: async (c, { params, input }) => ({
+        data: await op.run(callerOf(c), { ...input, ...params }),
+      }),
+    })),
+    {
+      bodyLimit: 1024 * 1024,
+      tooLarge: (maxBytes) => errors.payloadTooLarge(maxBytes),
+      invalidBody: () => errors.validation('Send the body as a JSON object, such as {"name":"x"}'),
+    },
+  ),
+);
+```
+
+- **`input` is the query string on a GET or a DELETE, and the JSON body otherwise**, the rule
+  `buildOpenApi` documents. A name repeated in the query is a list: `?tag=a&tag=b` is
+  `{ tag: ["a", "b"] }`. An empty body is `{}`.
+- **A body that is not a JSON object calls `invalidBody`**, with `"malformed"` or
+  `"not-an-object"`, and the operation does not run. Reading it as `{}` would let a write whose
+  fields all have defaults run on a body nobody could read.
+- **`params` are the path's slots, apart from `input`.** `{ ...input, ...params }` lets the path
+  win, so a caller who names one id in the path and another in the body gets the one in the path.
+- **`before` runs ahead of the body limit**, so a stranger is refused before the upload is read.
+  Wrap your key check in `guard()` and `assertEveryRouteGuarded` names a route that forgot it.
+- **Nothing is validated before `run`.** Check who may call first, then parse, then replay a
+  stored answer, so a caller who may not call learns nothing about the input.
+- **204 drops `data`**, so one operation can answer its MCP tool and still send no body here.
+  `meta` goes beside `data` when `run` returns one.
+- **A header set in `run` stays on a refusal.** Set what a call cost in a `finally`, and the
+  refusal carries it too.
+- One method and path twice in the list throws.
+
+### Inside an Express app
+
+An Express backend serves the same Hono app, `restRoutes` and `mcpRoutes` included, through
+`fromHono`:
+
+```bash
+bun add hono @hono/node-server
+```
+
+```ts
+import { fromHono } from "@gusnips/server/express";
+
+app.use(["/v1", "/mcp"], fromHono(api)); // api: your Hono app, routes under /v1 and /mcp
+app.use(express.json()); // after it, never before
+```
+
+- **Mount it before any body parser.** After `express.json()` the body is already read, so a POST
+  would reach your API as `{}`. `fromHono` refuses such a request and passes an error to your
+  error middleware that says to move it, so the wrong order fails on the first request.
+- **Your Hono routes keep their full paths.** Express cuts the mount path off the URL, and
+  `fromHono` puts it back, so `/v1/things` is `/v1/things` on both sides.
+- Express middleware mounted before it, such as `helmet()` or `cors()`, still runs.
+- In a Hono route, `c.env.incoming` is the Node request, so the caller's address is
+  `c.env.incoming.socket.remoteAddress`. Type the app `new Hono<{ Bindings: HttpBindings }>()`,
+  with `HttpBindings` from `@hono/node-server`.
+
 ## Supabase Auth
 
 If your API verifies a Supabase token, it makes one decision every client depends on: did auth
@@ -1882,6 +1954,7 @@ Each of these was measured, not assumed.
 - A mail without a text part is refused.
 - A mail login is never sent over a connection without TLS.
 - An MCP tool handler never throws, and a tool's `.shape` does not compile.
+- A REST body that is not a JSON object is refused, never read as `{}`.
 - An API reference names the origin you configure, never the one a request came in on. A
   repeated operation id, a tag you did not list, a schema that refers to itself, or a body on a
   204 throws.

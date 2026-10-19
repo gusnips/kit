@@ -1,6 +1,6 @@
 Rules for `@gusnips/migrate`. Layout, commands, publishing and house rules are in the root
-`AGENTS.md`. The server invariants run across three files: 1 to 20 here, 21 to 50 in
-`server/AGENTS.md`, 51 to 54 in `sdkgen/AGENTS.md`.
+`AGENTS.md`. The server invariants run across three files: 1 to 20 here, 21 to 52 in
+`server/AGENTS.md`, 53 to 56 in `sdkgen/AGENTS.md`.
 
 # Invariants — do not regress these
 

@@ -21,8 +21,8 @@ folder you change.
 | `react/AGENTS.md`   | frontend invariants 16 to 21, for anything under `react/src/ui/`       |
 | `tokens/AGENTS.md`  | the token contract, measured                                           |
 | `migrate/AGENTS.md` | server invariants 1 to 20, the SSL helper, and what the build measured |
-| `server/AGENTS.md`  | server invariants 21 to 50                                             |
-| `sdkgen/AGENTS.md`  | server invariants 51 to 54                                             |
+| `server/AGENTS.md`  | server invariants 21 to 52                                             |
+| `sdkgen/AGENTS.md`  | server invariants 53 to 56                                             |
 | `MIGRATIONS.md`     | what moving each app onto the frontend packages taught                 |
 
 The two halves number their invariants separately. "Invariant 8" in this file, in `react/` or in
@@ -225,7 +225,7 @@ dedup, the same as in the frontend packages.
         ├── errors.ts     ← AppError and createAppError(): your code→status map is the contract
         ├── responses.ts  ← the envelope both ways: ok/created/paginated, and createErrorResponse
         ├── logger/       ← createLogger() and the serializer that decides what a log line keeps
-        ├── hono/         ← the edge: errorBoundary, guards, headers, CORS and the four adapters
+        ├── hono/         ← the edge: errorBoundary, guards, headers, CORS, the four adapters and restRoutes
         ├── supabase/     ← isAuthOutage(): did auth say no, or fail to answer?
         ├── pg/           ← createPgPool() with a bounded wait; createIdempotency(); the OAuth store
         ├── redis/        ← createRedis(), the bounded probes, and the rate-limit window store
@@ -246,7 +246,8 @@ dedup, the same as in the frontend packages.
         ├── text-from-html.ts ← textFromHtml(): a mail's text part from its HTML, addresses kept
         ├── env.ts        ← validateEnv(): every problem with the environment, in one error
         ├── node/         ← the one directory allowed Node: fetchPublic(), scryptSealKey(), the API key codec and the drain
-        │   └── mail/     ← createMailer(), the /mail subpath: SMTP needs a socket a Worker lacks
+        │   ├── mail/     ← createMailer(), the /mail subpath: SMTP needs a socket a Worker lacks
+        │   └── express/  ← fromHono(), the /express subpath: a Hono app inside an Express one
         └── __tests__/    ← the throwaway redis-server the Redis and BullMQ suites share
 ```
 

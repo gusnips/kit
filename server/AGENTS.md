@@ -1,9 +1,9 @@
 Rules for `@gusnips/server`. Layout, commands, publishing and house rules are in the root
 `AGENTS.md`. The server invariants run across three files: 1 to 20 in `migrate/AGENTS.md`, 21 to
-50 here, 51 to 54 in `sdkgen/AGENTS.md`. Each one is a bug a donor shipped, or a fix a donor had
+52 here, 53 to 56 in `sdkgen/AGENTS.md`. Each one is a bug a donor shipped, or a fix a donor had
 and the others did not. The tests pin them.
 
-# Invariants 21 to 50, for `@gusnips/server`
+# Invariants 21 to 52, for `@gusnips/server`
 
 21. **A success builder returns an ANSWER, not a body — so on Hono, import the adapters.** `ok`,
     `created`, `paginated` and `noContent` in `responses.ts` answer `{ status, body }`, because the
@@ -783,3 +783,40 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     under the cap, while nothing in it serializes the owner, so two creates can each count the
     snapshot before the other's insert. Nobody has measured it either way. It comes here only
     with a test that races two creates on a real Postgres.
+
+51. **An operation's REST route reads its input one way, refuses a body it cannot read, and
+    validates nothing.** Three backends mounted their operation lists with a loop of their own,
+    and each knew something the others did not. Two read the query with `c.req.query()`, which
+    keeps the first of a repeated name; the third kept every value, because its filters take
+    several. Two read a body that failed to parse as `{}` so the schema would answer, which would
+    run a write whose fields all have defaults on a body nobody could read; the third refused it,
+    and refused a string, an array or `null` the same way. One read a DELETE's input from its body
+    and two from the query. `buildOpenApi` already documents the query, so the route follows the
+    reference: a second rule would let the route and its docs disagree. The path's slots arrive
+    apart from the input, because one backend keeps them apart and two merge them with the path
+    winning, and that merge is one line in `run`.
+
+    **Validation is the product's, because the order is.** One backend checks the owner, the
+    grant, the workspace's state and its policy before it parses, and before it looks up a stored
+    answer, so a caller who may not call learns nothing about the schema and is never handed a
+    replay. A transport that parsed first would undo that, so `run` gets the input as it was read.
+    `before` runs ahead of the body limit for the reason invariant 41 gives. A header set inside
+    `run` survives a refusal, because `errorHandler` answers through `c.json` on the same context:
+    one backend shows what a refused call cost that way, and a test pins it. A 204 drops `data`,
+    because one operation can hand its MCP tool a result while its REST answer has no body. Ten
+    planted defects, each caught by a named test, with a green control.
+
+52. **An Express backend runs the Hono doors through `fromHono`, mounted before its body parser,
+    and the wrong order is refused.** The Hono-only design said no Express adapter, ever. Three
+    backends on Express 4, all on Bun, then needed an API and an MCP door, and the doors are Hono
+    apps. Writing them again for Express would be two of each, so the doors stay Hono and
+    `@hono/node-server`'s `getRequestListener` carries the request across. A probe ran the kit's
+    `restRoutes` and `mcpRoutes` inside Express 4.22, under Bun 1.4.2 and Node 24.21, and the plain
+    recipe broke twice without a word. Under `app.use("/v1", …)` Express cuts `/v1` off the URL, so
+    every route answered 404. And with `express.json()` mounted first, the body was already spent:
+    a POST reached the API as `{}`, an MCP call failed as a parse error, and a malformed body got
+    Express's HTML page with the stack in it. That second break is the one invariant 51 refuses
+    inside the transport, arriving from outside it. So `fromHono` restores the full URL and refuses
+    a request whose `body` a parser already set, with an error that says to move it. Both are
+    planted-defect tested against a real Express. It sits in `src/node/` because it takes Node's
+    request, and imports no Express: its request type is the two fields it reads.

@@ -5,6 +5,9 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { hasPostgres, startPostgres } from "../__tests__/postgres-server.ts";
 import { checkOAuthTable, createPgOAuthStore } from "../pg/oauth-store.ts";
+import type { RateLimitStore } from "../hono/rate-limit.ts";
+import { createLogger } from "../logger/index.ts";
+import { memoryWindowStore } from "../rate-limit.ts";
 import { createMemoryOAuthStore } from "./testing.ts";
 import {
   challengeOf,
@@ -635,6 +638,24 @@ function flows(name: string, setup: () => Promise<{ store: () => OAuthStore }>) 
         ]);
       });
 
+      it("names the key in your own words, cut to 60 characters", async () => {
+        const oauth = make({ deviceKeyName: (clientName) => clientName });
+        const { device_code, user_code } = codes(await start(oauth));
+        expect(await oauth.describeDevice(user_code)).toMatchObject({ keyName: "Acme CLI" });
+        await oauth.decideDevice(user_code, { subject: "user-1" });
+        advance(5);
+        expect((await poll(oauth, device_code)).status).toBe(200);
+        expect(minted).toEqual([
+          { subject: "user-1", keyName: "Acme CLI", clientName: "Acme CLI" },
+        ]);
+
+        const long = make({ deviceKeyName: () => "x".repeat(80) });
+        const other = codes(await start(long));
+        expect(await long.describeDevice(other.user_code)).toMatchObject({
+          keyName: "x".repeat(60),
+        });
+      });
+
       it("tells the script when the person said no", async () => {
         const oauth = make();
         const { device_code, user_code } = codes(await start(oauth));
@@ -920,7 +941,7 @@ describe("oauthRoutes", () => {
 });
 
 describe("oauthRoutes' own limits", () => {
-  const make = () => {
+  const make = (counted: RateLimitStore | Record<string, never> = {}) => {
     const oauth = createOAuth({
       issuer: ISSUER,
       resource: `${ISSUER}/mcp`,
@@ -932,7 +953,7 @@ describe("oauthRoutes' own limits", () => {
       mintKey: async () => "ak_1",
     });
     const app = withErrors(new Hono());
-    app.route("/", oauthRoutes(oauth, routeOptions));
+    app.route("/", oauthRoutes(oauth, { ...routeOptions, ...counted }));
     return app;
   };
   const start = (app: Hono, caller: string) =>
@@ -958,6 +979,33 @@ describe("oauthRoutes' own limits", () => {
     expect(refused.status).toBe(429);
     expect(await refused.json()).toEqual({ thrown: "Too many device sign-ins" });
     expect((await start(app, "b")).status).toBe(200);
+  });
+
+  it("counts in the store you pass, so instances that share one share the limit", async () => {
+    // Two instances, as a Worker's isolates are. Alone, each lets the caller start 10.
+    const [first, second] = [make(), make()];
+    for (let i = 0; i < 6; i++) expect((await start(first, "a")).status).toBe(200);
+    for (let i = 0; i < 6; i++) expect((await start(second, "a")).status).toBe(200);
+
+    const store = memoryWindowStore();
+    const [one, two] = [make({ store }), make({ store })];
+    for (let i = 0; i < 5; i++) expect((await start(one, "a")).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await start(two, "a")).status).toBe(200);
+    expect((await start(one, "a")).status).toBe(429);
+    expect((await start(two, "a")).status).toBe(429);
+  });
+
+  it("hands a shared store's outage to your own answer for it", async () => {
+    const lines: string[] = [];
+    const app = make({
+      store: { canFail: true, hit: () => Promise.reject(new Error("the database is down")) },
+      whenStoreFails: () => new TooMany("Limits are down"),
+      logger: createLogger({ write: (line) => lines.push(line) }),
+    });
+    const refused = await start(app, "a");
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({ thrown: "Limits are down" });
+    expect(lines.join("")).toContain("the store did not answer");
   });
 
   it("refuses a body over 64 KiB in OAuth's shape, before reading it", async () => {
@@ -1058,6 +1106,27 @@ describe("oauthConsoleRoutes", () => {
     );
     expect(traded.status).toBe(200);
     expect(minted).toEqual([{ subject: "user-7", keyName: "Agent (agent.example)" }]);
+  });
+
+  it("keeps every answer out of caches, the yes that carries the code above all", async () => {
+    const { oauth, app, post } = make(() => "user-1");
+    const query = authorizeQuery(await registered(oauth)).toString();
+    const started = await oauth.deviceAuthorization({ client_id: "acme-cli" }, null);
+    const { user_code } = started.body as { user_code: string };
+    const answers = {
+      request: await app.request(`/auth/oauth/request?${query}`),
+      approve: await post("/approve", { query }),
+      refusal: await post("/approve", "not json"),
+      device: await app.request(`/auth/oauth/device?code=${user_code}`),
+      decide: await post("/device", { code: user_code, decision: "approve" }),
+    };
+    expect(await answers.approve.clone().json()).toMatchObject({
+      data: { redirectTo: expect.stringContaining("code=") },
+    });
+    for (const [name, res] of Object.entries(answers)) {
+      expect(res.headers.get("cache-control"), name).toBe("no-store");
+      expect(res.headers.get("pragma"), name).toBe("no-cache");
+    }
   });
 
   it("lets the approver's own error stop a yes, and makes no code", async () => {

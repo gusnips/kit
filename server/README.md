@@ -1487,7 +1487,9 @@ app.route("/auth/oauth", oauthConsoleRoutes<AppEnv>(oauth, { approver }));
 `Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp"`.
 A client that meets your door without a token reads it and starts the sign-in. `oauthRoutes`
 caps its bodies at 64 KiB and lets one caller (`deviceKey`, an address your server checked) start
-10 device sign-ins a minute, refused with your own 429.
+10 device sign-ins a minute, refused with your own 429. It counts in this process's memory. On a
+Worker, or with several instances behind one address, pass a shared `WindowStore` as `store`,
+with `whenStoreFails` and `logger`, the same three `rateLimit` takes.
 
 `deriveOAuthSigningKey(root, label = "oauth:v1")` is the HMAC-SHA256 of `label`, keyed with
 `root`, so every instance signs the same way and no new variable is needed. It throws when `root`
@@ -1538,8 +1540,8 @@ Serve both pages with `frame-ancestors 'none'`, so another site can't frame them
 click. Read the session on those routes from a header, as an API does, not from a cookie, or
 protect them against cross-site requests.
 
-Each route answers `{ data }`. A refusal is `{ data: { ok: false, reason, message } }`, not an
-error: `reason` is one of `unknown-client`, `redirect-mismatch`, `invalid-request` (also a body
+Each route answers `{ data }`, with `Cache-Control: no-store`, because the yes carries the
+authorization code. A refusal is `{ data: { ok: false, reason, message } }`, not an error: `reason` is one of `unknown-client`, `redirect-mismatch`, `invalid-request` (also a body
 your own page would never send), `wrong-resource` and `unknown-code`. Word your own page for it,
 and never redirect on a refusal. What `approver` throws goes through your `onError`.
 
@@ -1583,7 +1585,9 @@ CREATE INDEX oauth_grants_expires_at_idx ON app.oauth_grants (expires_at);
   stores nothing: the id is our signature over the client's name and redirects, so registering
   costs no row. The third is a name in `deviceClients`.
 - **Only `deviceClients` may start a device sign-in.** A registered client picks its own name, so
-  anyone could start a sign-in called "Claude" and send the link to someone who never asked.
+  anyone could start a sign-in called "Claude" and send the link to someone who never asked. Its
+  key is named `Acme CLI (device sign-in)`. For other words or another language, pass
+  `deviceKeyName`: it gets the client's name and returns the key's, cut to 60 characters.
 - **A code works once, within 5 minutes**, with PKCE S256. A `resource` may be left out, or be
   your door or your issuer; anything else is refused. The door must be on the issuer's origin,
   and `createOAuth` throws when it isn't. A device sign-in lasts 10 minutes, the script polls every 5 seconds, a faster poll gets

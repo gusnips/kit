@@ -696,10 +696,19 @@ your scripts signs in on a machine with no browser, it prints a short code, and 
 it on your device page. `@gusnips/server/oauth` is the server half. These two hooks are the
 logic for the two pages. The pages themselves are yours.
 
+```ts
+import { createOAuthConsoleApi } from "@gusnips/react/oauth";
+
+export const oauthApi = createOAuthConsoleApi(api, "/auth/oauth");
+```
+
+That is both pages' calls to the server's `oauthConsoleRoutes`, mounted at `/auth/oauth` behind
+your sign-in. `api` is your `createApiClient` client, or any object with its `get` and `post`.
+
 ```tsx
 import { useConsentRequest } from "@gusnips/react/oauth";
 
-const consent = useConsentRequest(api.oauth, useLocation().search);
+const consent = useConsentRequest(oauthApi.consent, useLocation().search);
 
 if (consent.state.status === "ready")
   return (
@@ -709,9 +718,11 @@ if (consent.state.status === "ready")
   );
 ```
 
-`api.oauth` is two calls to your own API: `describe(query)` and `approve(query, choice)`. They
-reach the server's `describe` and `approve` through routes behind your sign-in. `state.status` is
-`loading`, `refused`, `failed` or `ready`:
+If your routes are your own, pass your own two calls instead: `describe(query)` and
+`approve(query, choice)`. The choice is anything your page adds, such as a workspace, and it reaches
+the server's approver. With no choice, call `approve()`. When your server adds fields to the view,
+type them as the second parameter, `ConsentApi<Choice, { spaces: Space[] }>`, and
+`state.view.spaces` is typed too. `state.status` is `loading`, `refused`, `failed` or `ready`:
 
 - **`refused`** means the request is not one to answer: an unknown app, or a return address it
   never registered. Show `refusal.message` (or your own words for `refusal.reason`) and a link
@@ -726,12 +737,22 @@ for a second press. Approve sends the browser on with `window.location.assign`, 
 an app's own scheme such as `cursor://`.
 
 ```tsx
-import { useDeviceApproval } from "@gusnips/react/oauth";
+import { useDeviceApproval, useDeviceCodeField } from "@gusnips/react/oauth";
 
-const device = useDeviceApproval(api.device, useLocation().search);
+const device = useDeviceApproval(oauthApi.device, useLocation().search);
+const field = useDeviceCodeField(device);
 
-<input value={device.code} onChange={(event) => device.setCode(event.target.value)} />;
+<label htmlFor={field.inputProps.id}>Code</label>
+<input {...field.inputProps} />
+<p {...field.statusProps}>{device.invalidLetter ? "Codes have no vowels." : null}</p>
 ```
+
+`useDeviceCodeField` is the field's wiring: the input's id, value and change handler, the
+attributes a typed code needs (no autocomplete, capitals, no spell check), `aria-invalid`, and the
+status line as the input's description, read out when it changes. It focuses the field only when it
+starts empty. It also keeps the code in the address as `?code=`, so a reload or a shared link comes
+back to the same code. It replaces the address and never pushes, so Back still leaves the page.
+Once the person decides, the code leaves the address, because the server no longer knows it.
 
 The link the script prints carries `?code=`, so the field usually starts full. The field shows
 what was typed as `WDJB-MJHT`, however it was typed. `invalidLetter` turns on as soon as a letter
@@ -742,6 +763,10 @@ sign-in yourself, just now, and this is the code on your screen. Somebody can ru
 and send a stranger the link, and that sentence is the only guard against it. Once decided, the
 page stays decided: it never asks the server again, because the server no longer knows the code,
 and asking on the next focus would tell someone who just said yes that their code is wrong.
+
+`approve(choice)` sends a choice with the yes, as on the consent page; `deny()` sends none.
+`pending` is `"approve"` or `"deny"` from the press until the server answers, so the spinner goes
+on the button that was pressed.
 
 ## A new API key, shown once
 
@@ -891,7 +916,7 @@ lives behind a subpath, so you install a dependency only if you import the thing
 | `@gusnips/react/contract` | two prerender names                      | nothing               |
 | `@gusnips/react/theme`    | `createTheme`, `startTheme`              | react                 |
 | `@gusnips/react/commands` | slash matching and `useSlashCommands`    | react                 |
-| `@gusnips/react/oauth`    | `useConsentRequest`, `useDeviceApproval` | @tanstack/react-query |
+| `@gusnips/react/oauth`    | the consent and device page hooks        | @tanstack/react-query |
 | `@gusnips/react/keys`     | `createKeyLifecycle`, `useKeyReveals`    | react                 |
 
 The rule behind that table: **a peer marked optional must not be reachable from the main entry

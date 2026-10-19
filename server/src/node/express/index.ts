@@ -13,6 +13,10 @@
  *   stack in it. A request a parser already read is refused here, so the wrong order fails on the
  *   first request instead of quietly.
  *
+ * A third came from the first adopter's own proof: by default the listener swaps the process's
+ * global `Request` and `Response` for its own classes, so mounting the API changed every other
+ * fetch in the process. This turns that off.
+ *
  * `@gusnips/server/express`. `@hono/node-server` is an optional peer, and this subpath is the only
  * place that imports it. No Express import: the types below are the parts of its request it reads.
  */
@@ -32,7 +36,11 @@ export type ExpressRequest = IncomingMessage & { originalUrl: string; body?: unk
 export function fromHono(app: {
   fetch: (request: Request, env: HttpBindings | Http2Bindings) => Response | Promise<Response>;
 }): (req: ExpressRequest, res: ServerResponse, next: (error?: unknown) => void) => void {
-  const listener = getRequestListener((request, env) => app.fetch(request, env));
+  // Left on, the option replaces the process's global Request and Response with the server's own
+  // lighter classes the moment this runs, under every other fetch the app makes.
+  const listener = getRequestListener((request, env) => app.fetch(request, env), {
+    overrideGlobalObjects: false,
+  });
   return (req, res, next) => {
     if (req.body !== undefined) {
       next(

@@ -483,6 +483,9 @@ app.use(express.json()); // after it, never before
 - **Your Hono routes keep their full paths.** Express cuts the mount path off the URL, and
   `fromHono` puts it back, so `/v1/things` is `/v1/things` on both sides.
 - Express middleware mounted before it, such as `helmet()` or `cors()`, still runs.
+- **The rest of your app keeps its own `fetch`.** `fromHono` leaves the global `Request` and
+  `Response` alone. `@hono/node-server` swaps both by default, which changes every other fetch in
+  the process; through 0.14.1 `fromHono` let it.
 - In a Hono route, `c.env.incoming` is the Node request, so the caller's address is
   `c.env.incoming.socket.remoteAddress`. Type the app `new Hono<{ Bindings: HttpBindings }>()`,
   with `HttpBindings` from `@hono/node-server`.

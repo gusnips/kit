@@ -1,0 +1,126 @@
+Rules for `@gusnips/migrate`. Layout, commands, publishing and house rules are in the root
+`AGENTS.md`. The server invariants run across three files: 1 to 20 here, 21 to 50 in
+`server/AGENTS.md`, 51 to 54 in `sdkgen/AGENTS.md`.
+
+# Invariants — do not regress these
+
+Each one is a bug a donor shipped, or a fix a donor had and the others did not. The tests pin them.
+When one fails, a lesson is being unlearned.
+
+1. **Ask before taking the lock, never while holding it.** A runner prompted `[y/N]` while it held
+   `pg_advisory_lock`. An operator who walked away blocked the next deploy's runner with no end, and
+   no runner set a timeout. The runner also refuses to ask without a terminal: under Bun, `prompt()`
+   blocks while stdin stays open, which is what `ssh host 'migrate --manual'` gives it.
+2. **The lock comes before any DDL, and the wait for it is bounded.** Six runners created the
+   tracking table before locking, and two runners creating it at once on an empty database can fail
+   on the catalog's unique index. The wait is 120 seconds by default, and the message names the
+   session that holds it. **The wait polls `pg_try_advisory_lock` once a second; it never blocks in
+   `pg_advisory_lock`.** A session blocked in that call holds a snapshot for the whole wait. When the
+   run holding the lock is building an index CONCURRENTLY in a no-transaction file, the build waits
+   for every older snapshot to end, the waiter's included, and the waiter waits for the lock.
+   Postgres reports `deadlock detected` after `deadlock_timeout` (1s), long before any
+   `lock_timeout`, and kills one side; when that is the build, the index stays INVALID. Reproduced
+   in two donor runners, with and without `lock_timeout`, and in this package's test before the fix.
+   The key is one default, `727001001`, in every repo; most old runners used another key or none, so
+   during the one deploy that swaps a repo's runner an old run and a new run may not exclude each
+   other, and that repo's deploy concurrency group is what covers it.
+3. **`RESET ALL` before every file.** A `pg_dump` baseline runs
+   `set_config('search_path', '', false)`, which lasts for the session, so in three donors every file
+   after the baseline failed at its first unqualified name, on any replay from empty. The same dump
+   leaves `check_function_bodies = false` on. Measured: `RESET ALL` keeps the advisory lock, and
+   restores the `-c search_path` the connection started with.
+4. **A no-transaction file is split into statements.** Postgres runs a multi-statement query as one
+   implicit transaction, and `CREATE INDEX CONCURRENTLY` refuses to run inside one (measured). Six
+   runners sent the whole file at once, on the path one of them documented as the way to run
+   `CONCURRENTLY`. The splitter refuses `BEGIN ATOMIC` rather than cut a function body in half.
+5. **Directives come from the leading comment block only, and an unknown one is an error.** The old
+   marker `-- @manual` meant "gated, in a transaction" in four runners and "no transaction" in six,
+   so reading it either way changes one family's files without a word. It is an error now on any
+   line of the file, not only at the top: six runners matched it anywhere, so a file marked below its
+   first statement was held, and it must not start applying without a word. A `-- migrate:`
+   directive after the first statement is an error too, because somebody thinks it is working.
+6. **A held file is held, not a halt.** Later files still apply. A halt would turn every gated
+   contract migration, which can wait weeks for a person, into a schema freeze. A later file that
+   needs a held one fails loudly, in its own transaction. CI replays pass `--manual --yes`, because a
+   replay that skipped a held file is exactly how one donor's chain broke.
+7. **"Nothing to do" is printed only when nothing is held.** Six runners printed it right under a
+   held file. Four more printed it after cancelling the question, and exited 0 with no held-file
+   line at all.
+8. **The guard counts only what this run would apply.** Two runners counted held files, so a laptop
+   run with only a gated file pending refused with "Refusing to apply 1 migration(s)" for a run that
+   would apply nothing.
+9. **Unknown flags are an error, and nothing runs.** All eleven ignored them, so in the eight with
+   no `--status`, `migrate --status` applied every pending file.
+10. **`--status` is read-only: no DDL, no lock.** One runner created the schema and table before
+    its status branch, so a status check wrote to a fresh database. And a status that cannot reach
+    the database exits 1 and prints no `Status:` line. One deploy ended its status command with
+    `|| true`, so a dead database printed nothing and read as "up to date".
+11. **The runner listens for `error` on the client.** None of the eleven did. When the connection
+    drops, pg emits `error` right after it rejects the query, and with no listener that throws, so the
+    process died before it could name the file it was applying.
+12. **The lines a workflow greps are constants in `lines.ts`, pinned byte for byte.** A chain
+    verifier required `Applying 000_baseline.sql (1 of 1)` and failed on every run once the folder
+    held six files. And `${LINE#*[MIGRATIONS] }` is a trap in three workflows: in a shell pattern the
+    brackets are a set that matches ONE character. It happens to cut the right text on the
+    `MANUAL_PENDING` line, which is luck, so the README shows `${LINE#*MANUAL_PENDING }`.
+13. **The package runs under plain Node.** No `import.meta.dir`, no `Bun.*`, no `prompt()`. The bin
+    test runs under `node`, and `release:check` imports the packed tarball under `node`.
+14. **The runner script imports nothing from the app.** One donor's runner imported the app's
+    barrel, which loaded an AI client, which threw when its API key was unset, so a schema change
+    failed for want of an unrelated key. An adopter's script imports `@gusnips/migrate` and nothing
+    else. A seed script that needs the guard imports it from the package, not from the runner
+    script, because the runner script runs on import.
+15. **Types regenerate only after a run that applied something, and only after the client has
+    closed.** One donor's wrapper regenerated types after `--status` too.
+16. **One bin, and its name starts with `gusnips-`.** The first build shipped `migrate`, `db-types`
+    and `supabase-stand-in`. The first two are unrelated packages on npm, and anyone can register
+    the third, so the README's own `bunx migrate`, run in a CI job without this package installed,
+    would download a stranger's code and run it with `DATABASE_URL` in its environment. Generic
+    names also collide in an adopter's `node_modules/.bin`. `db-types` and `supabase-stand-in` are
+    commands under `gusnips-migrate`, read from the first argument before any flag parsing, so an
+    unknown flag or a command name anywhere else is still an error. `release:check` refuses a bin
+    without the prefix.
+
+## …and four for `db-types`
+
+17. **The output has no timestamp.** The same schema gives the same bytes, which is the only way
+    `--check` can compare. `--check` compares after `--format`, because the committed file is the
+    formatted one.
+18. **A foreign key into another schema is left out of `Relationships`.** The `Database` type
+    describes one schema, so the donor generators emitted `REFERENCES auth.users` as a relationship
+    to the schema's own `users` table, and a join PostgREST refuses typechecked.
+19. **Generated columns and identity `GENERATED ALWAYS` columns are `?: never` in `Insert` and
+    `Update`.** Postgres refuses a value for them, so `?: T` typechecked an insert that failed at
+    runtime.
+20. **`money` and `halfvec` map to `string`.** `money`'s text form is `$1.00`, which is not a JSON
+    number.
+
+## The SSL helper
+
+`pgSsl(url)` keeps what ten donor copies did: an `sslmode` in the URL wins, Supabase cloud hosts
+connect without a certificate check, and every other host connects without TLS. Whether Supabase
+cloud certificates verify with Node's default CA store has not been measured. Until it is,
+`sslmode=verify-full` in the URL is how an adopter asks for a check.
+
+## A driver fact
+
+`pg` cannot connect to a bracketed IPv6 URL: `postgresql://…@[::1]:5432/app` fails with `ENOTFOUND`,
+because the brackets reach the DNS lookup, while `host: "::1"` connects. Measured with pg 8.23 under
+both Bun 1.3.8 and Node 22. It is the driver's, not the runner's, and `describeTarget` stripping the
+brackets is still right for the guard. Someone on IPv6 loopback writes `localhost` or passes the
+host outside the URL.
+
+# What the build measured
+
+- **Every donor chain replayed from an empty Postgres 18.** Eleven chains, 313 files, each run as
+  stand-in → `migrate --manual --yes` → a second run that applies nothing → `--status`. Eight
+  applied as they are. One needed `pgvector` on the server. One needed `pgvector` and a guard around
+  an extension it creates and never uses. One stopped before connecting, on purpose, at its one file
+  with the old `-- @manual` marker, and applied in full once that marker was renamed. Four chains
+  ran with `--search-path app`, because their files name tables without a schema.
+- **The generator was proved against the old ones on the same databases.** Four came out
+  byte-identical after the header. One differed only in a comment's wording. The other five differ
+  by design (relationships, write shapes, helper names), and each was checked with a predicate that
+  every `Row` type is unchanged, rather than read by eye.
+- **Every test for a donor bug was watched failing first**, by putting the bug back into the runner
+  and running the suite.

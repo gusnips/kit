@@ -304,9 +304,16 @@ export function createOAuth(options: OAuthOptions) {
     const uris = document.redirect_uris;
     if (!isStringList(uris) || uris.length === 0 || uris.length > MAX_REDIRECT_URIS) return null;
     if (!uris.every(isAllowedRedirect)) return null;
-    // A document is public, so it can hold no secret: only a public client may use one.
-    const method = document.token_endpoint_auth_method;
-    if (method !== undefined && method !== "none") return null;
+    // A document is public, so it can hold no secret, and we verify no signed assertion: `none` is
+    // the only method we share with it. MCP's SEP-3149 (2026-07, co-written by OpenAI) has the
+    // client list what it accepts in `token_endpoint_auth_methods_supported` and use one we also
+    // accept, so ChatGPT's `["none", "private_key_jwt"]` with `private_key_jwt` preferred comes
+    // here as `none`. The list beats the single method when both are present; neither means
+    // `none`. A preferred method missing from its own list is a document that contradicts itself.
+    const preferred = document.token_endpoint_auth_method;
+    const methods = document.token_endpoint_auth_methods_supported ?? [preferred ?? "none"];
+    if (!isStringList(methods) || !methods.includes("none")) return null;
+    if (preferred !== undefined && !methods.some((method) => method === preferred)) return null;
     const named = typeof document.client_name === "string" ? document.client_name.trim() : "";
     const client: OAuthClient = {
       id: clientId,
@@ -340,7 +347,10 @@ export function createOAuth(options: OAuthOptions) {
   async function authenticate(credentials: ClientCredentials): Promise<OAuthClient | null> {
     // A metadata document can only describe a public client, and the code it trades was bound to
     // this exact id when the person approved, behind their own session. Fetching it again here
-    // would let anyone, signed in or not, make us fetch any URL they name.
+    // would let anyone, signed in or not, make us fetch any URL they name. A `client_assertion`
+    // sent anyway is never read: unverified, it proves nothing, so it neither signs the client in
+    // nor fails the exchange, and the PKCE verifier is what the code checks, as for any public
+    // client. With no `client_id` beside it, the client is unknown.
     const { id } = credentials;
     if (id?.startsWith("https://") && id.length <= MAX_CLIENT_ID_LENGTH)
       return { id, name: id, redirectUris: [], authMethod: "none" };

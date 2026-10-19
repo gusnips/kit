@@ -107,9 +107,9 @@ when:
 End your prerender script with `process.exit(0)`. Under bun, importing this renderer leaves the
 process alive after the last file is written: `react-dom/server` exits, `react-dom/static.browser`
 does not, and `process.getActiveResourcesInfo()` shows nothing either way, so the only symptom is a
-script that finishes its work and never returns. Node exits either way. We do not call `exit` for
-you (a library killing its host process is worse than the hang), and in CI the alternative is a
-job that builds everything and then runs to its timeout.
+script that finishes its work and never returns. Node 26 does the same (measured with react-dom
+19.3). We do not call `exit` for you (a library killing its host process is worse than the hang),
+and in CI the alternative is a job that builds everything and then runs to its timeout.
 
 ## Flat files
 

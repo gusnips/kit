@@ -434,10 +434,16 @@ pin them; if one fails, a lesson is being un-learned.
    importing that renderer holds the event loop open, so a prerender script that has written every
    file and printed its summary **will not exit on its own**. It ends with `process.exit(0)`.
    Measured by elimination, with no app code loaded: `react-dom/server` exits,
-   `react-dom/static.browser` does not, node exits either way, and
+   `react-dom/static.browser` does not, and
    `process.getActiveResourcesInfo()` reports nothing — so the only symptom is a CI job that does
    all of its work and then runs to its timeout. A library must not call `exit` on its host, which
    is why this is written down in three places instead of fixed in one.
+
+   **This said node exits either way, and on node 26 it does not.** Measured 2026-10-19 on node
+   26.0 with react-dom 19.3: `react-dom/server` and `react-dom/static` exit, and
+   `react-dom/static.browser` is still running 25 seconds after its import resolved. The release
+   check found it, waiting on `@gusnips/vite/render` to exit under plain node. So the
+   `process.exit(0)` is needed under either runtime.
 
 2. **A prerendered file names its own route**, and the entry hydrates only on a match.
    "Does the root have children" is the wrong question and getting it wrong is silent: a static

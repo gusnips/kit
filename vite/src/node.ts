@@ -62,8 +62,9 @@ function exportsRenderer<Context>(mod: unknown): mod is { renderPage: PageRender
  * and under bun `react-dom/static.browser`, which invariant 1 requires every app on this rig to
  * load, leaves that process alive after its last await. Measured by elimination with no app code at
  * all: `react-dom/server` exits, `static.browser` does not, and `process.getActiveResourcesInfo()`
- * reports nothing either way, so the handle is invisible to everything except the hang. Under node
- * it exits. Nothing here can undo it, because a library must not call `process.exit` on its host. A
+ * reports nothing either way, so the handle is invisible to everything except the hang. Node 26
+ * does the same with react-dom 19.3 (measured 2026-10-19). Nothing here can undo it, because a
+ * library must not call `process.exit` on its host. A
  * prerender script ends with `process.exit(0)` once every file is written, and in CI the
  * alternative is a job that does all its work and then runs to its timeout. Five adopters had
  * already written that line against a DIFFERENT holder (an auth client whose token-refresh timer

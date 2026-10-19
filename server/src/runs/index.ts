@@ -12,8 +12,10 @@
  *   takes the run over, or ends it, by the run's own `restart` policy.
  * - **Starting over is not free.** One donor ran a cut run again from the start with its spend
  *   counter back at zero, so the second run could buy past what the person had allowed, and the
- *   fix it shipped was letting the second run use free data only. Here the checkpoint lives on the
- *   row, so a resumed run goes on from it.
+ *   fix it shipped was letting the second run use free data only. Here the checkpoint and the
+ *   spend live on the rows, so a resumed run goes on from its checkpoint with its spend counted.
+ * - **A finished child is never paid for twice.** A child is a row kept under its parent and a key,
+ *   so a resumed parent that asks for a child it already ran gets the stored result back.
  * - **A screen watching a run needs a closing event.** Every way a run ends writes one, in the
  *   same statement, or a tail waits for a frame that never comes.
  * - **Appends never hold up the work, and never reorder.** `emit` returns at once; the appends run
@@ -60,6 +62,24 @@ export interface RunsOptions {
   leaseSecs?: number;
 }
 
+/** Caps for a whole tree: the root and every child under it, across restarts. */
+export interface RunLimits {
+  /**
+   * How many children run at once. A child waiting on its own children lends its place out while
+   * it waits, so a deep tree can never wait on itself.
+   */
+  maxParallel?: number;
+  /** How many children the tree may start in all. */
+  maxChildren?: number;
+  /** How deep children may nest: the root is depth 0, its children depth 1. */
+  maxDepth?: number;
+  /**
+   * What the tree may spend, in US dollars, as counted by `run.spend`. Past it a new child is
+   * refused; work that already started goes on.
+   */
+  budgetUsd?: number;
+}
+
 export interface RunSpec {
   /** Which handler drives it: a key of the handlers you pass to `drive`. */
   kind: string;
@@ -76,7 +96,26 @@ export interface RunSpec {
   restart?: RestartPolicy;
   /** How many times a dead worker's run is taken over before it ends `restart_limit`. Default 5. */
   maxCrashes?: number;
+  limits?: RunLimits;
 }
+
+/** A child run. Its code is the function passed to `run.child`. */
+export interface ChildSpec {
+  /** A label for the child's row, such as `"search"`. */
+  kind: string;
+  /** What the child's function reads as `run.input`. Stored as JSON. */
+  input: unknown;
+  /** What happens to the child when its worker dies. Default: the root's policy. */
+  restart?: RestartPolicy;
+}
+
+/**
+ * How a child ended. `value` is what its function returned, read back from the row, so it is the
+ * same JSON on the first run and after a restart. `error.code` is `handler` (its function threw),
+ * `interrupted` (its worker died and its `restart` is `fail`), `cancelled`, or a limit that refused
+ * it before it started: `max_depth`, `max_children` or `budget`.
+ */
+export type ChildResult<T> = { ok: true; value: T } | { ok: false; error: RunError };
 
 /** What a handler gets. */
 export interface Run {
@@ -96,6 +135,19 @@ export interface Run {
   readonly signal: AbortSignal;
   /** Keeps `state` as the checkpoint a resumed run starts from. Throws once the run is lost. */
   save(state: unknown): Promise<void>;
+  /**
+   * Adds `usd` to what this run has spent, for the tree's `budgetUsd`. The total outlives a
+   * restart. Throws once the run is lost.
+   */
+  spend(usd: number): Promise<void>;
+  /**
+   * Runs `fn` as a child, kept under `key` among this run's children. A child that already
+   * finished, in this attempt or one before a restart, does not run again: `child` returns what it
+   * stored. A child its dead worker left unfinished goes by its own `restart`. Children run in
+   * this process, under this run's lease. Throws once the run is lost, and when this run already
+   * has a child running under `key`.
+   */
+  child<T>(key: string, spec: ChildSpec, fn: (run: Run) => Promise<T>): Promise<ChildResult<T>>;
   /**
    * Appends an event for `tail`, and returns at once. Appends run in order behind it, and the run
    * does not finish before they do. One that fails goes to `onError`; it never throws.
@@ -141,36 +193,76 @@ export class RunStopped extends Error {
 /** A name or `schema.name`, because the table is written into the SQL, not passed as a value. */
 const TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 const RESTART_POLICIES = new Set<string>(["fail", "restart", "resume"]);
+const LIMIT_NAMES = ["maxParallel", "maxChildren", "maxDepth", "budgetUsd"] as const;
 /** ponytail: a tail polls once a second, so the last event can be a second late. LISTEN/NOTIFY
  *  is the upgrade, at the cost of a connection held per tail. */
 const TAIL_POLL_MS = 1_000;
 const TAIL_PAGE = 100;
 
-interface ClaimedRow {
+/** What a handler's `run` is made from. */
+interface RunRow {
+  input: unknown;
+  checkpoint: unknown;
+  resumed: boolean;
+  crashes: number;
+}
+
+interface ClaimedRow extends RunRow {
   kind: string;
   owner: string;
-  input: unknown;
-  restart: RestartPolicy;
-  crashes: number;
-  resumed: boolean;
-  checkpoint: unknown;
+  limits: RunLimits;
+  /** Children the tree started, and what it spent, in every attempt so far. */
+  children: number;
+  spent: number;
 }
 
 /** One lease, held by one worker, over a root and everything under it. */
 interface Tree {
   rootId: string;
   token: string;
+  owner: string;
   controller: AbortController;
+  limits: RunLimits;
+  children: number;
+  spent: number;
+  slots?: Slots;
 }
 
 /** One run in a tree, with its own event sequence. */
 interface Node {
   id: string;
+  depth: number;
   seq: number;
   appends: Promise<void>;
+  /** The keys of its children running now. */
+  keys: Set<string>;
+  /** Its `maxParallel` slot: wanted while its function runs and waits on no child of its own. */
+  busy: boolean;
+  waiting: number;
+  slot: "none" | "asking" | "held";
+}
+
+/** The tree's `maxParallel` places. */
+interface Slots {
+  free: number;
+  queue: (() => void)[];
+}
+
+interface FoundChild<T> {
+  id: string;
+  status: RunStatus;
+  result: T;
+  error: RunError | null;
 }
 
 type Attempt = { ok: true; value: unknown } | { ok: false; error: unknown };
+
+/** How a run ends, as its row keeps it. */
+interface Verdict {
+  status: "succeeded" | "failed" | "cancelled";
+  result: string | null;
+  error: RunError | null;
+}
 
 /**
  * The runs store. Create runs with `create`, and have a queue worker call `drive` with the id:
@@ -192,12 +284,13 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         "dead worker 35 seconds later at the earliest, and the lease must have run out by then.",
     );
 
-  const createSql = `INSERT INTO ${runs} (id, root_id, kind, owner, restart, input, max_crashes)
-    VALUES ($1, $1, $2, $3, $4, $5::json, $6)`;
+  const createSql = `INSERT INTO ${runs} (id, root_id, kind, owner, restart, input, max_crashes,
+      limits)
+    VALUES ($1, $1, $2, $3, $4, $5::json, $6, $7::json)`;
 
   // A queued row, or a running one whose lease ran out and whose policy lets it go on. Taking over
   // a lease counts a crash; claiming a row a drain put back does not. `prev` reads the row under
-  // the same lock, as it was before this claim.
+  // the same lock, as it was before this claim. The tree's totals come with it, for its limits.
   const claimSql = `WITH prev AS (
       SELECT id, started_at IS NOT NULL AS resumed FROM ${runs}
       WHERE id = $1 AND parent_id IS NULL FOR UPDATE)
@@ -209,8 +302,10 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
     WHERE c.id = prev.id AND c.cancel_requested_at IS NULL
       AND (c.status = 'queued' OR (c.status = 'running' AND c.lease_until < now()
         AND c.restart <> 'fail' AND c.crashes < c.max_crashes))
-    RETURNING c.kind, c.owner, c.input, c.restart, c.crashes, prev.resumed,
-      CASE WHEN c.restart = 'resume' THEN c.checkpoint END AS checkpoint`;
+    RETURNING c.kind, c.owner, c.input, c.crashes, prev.resumed, c.limits,
+      CASE WHEN c.restart = 'resume' THEN c.checkpoint END AS checkpoint,
+      (SELECT count(*)::int FROM ${runs} k WHERE k.root_id = c.id AND k.id <> c.id) AS children,
+      (SELECT coalesce(sum(k.cost_usd), 0)::float8 FROM ${runs} k WHERE k.root_id = c.id) AS spent`;
   // Its own statement, after the claim: an append still in flight holds the row FOR SHARE, so the
   // claim waited for it to commit, and this read sees it.
   const lastSeqSql = `SELECT coalesce(max(seq), 0) AS seq FROM ${events} WHERE run_id = $1`;
@@ -225,10 +320,40 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
   // own WHERE, which Postgres reads again after any wait. An append, or a write anywhere below the
   // root, takes the root row FOR SHARE: it commits before a takeover's claim, or not at all.
   const heldRoot = `c.id = $1 AND c.root_id = $2 AND c.lease_token = $3 AND c.status = 'running'`;
-  const saveSql = `UPDATE ${runs} c SET checkpoint = $4::json, updated_at = now() WHERE ${heldRoot}`;
+  const rootHeld = `EXISTS (SELECT 1 FROM ${runs} r
+    WHERE r.id = $2 AND r.lease_token = $3 AND r.status = 'running' FOR SHARE)`;
+  const heldChild = `c.id = $1 AND c.root_id = $2 AND c.status = 'running' AND ${rootHeld}`;
+  /** One UPDATE, fenced either way: `[$1 run, $2 root, $3 token, ...]`. */
+  const fenced = (set: string) => ({
+    root: `UPDATE ${runs} c SET ${set}, updated_at = now() WHERE ${heldRoot}`,
+    child: `UPDATE ${runs} c SET ${set}, updated_at = now() WHERE ${heldChild}`,
+  });
+  const saveSql = fenced("checkpoint = $4::json");
+  const spendSql = fenced("cost_usd = c.cost_usd + $4");
   const appendSql = `INSERT INTO ${events} (run_id, seq, type, data)
     SELECT $1::uuid, $4::int, $5::text, $6::json FROM ${runs} r
     WHERE r.id = $2 AND r.lease_token = $3 AND r.status = 'running' FOR SHARE`;
+
+  const findChildSql = `SELECT id, status, result, error FROM ${runs}
+    WHERE parent_id = $1 AND child_key = $2`;
+  const addChildSql = `INSERT INTO ${runs} (id, root_id, parent_id, child_key, depth, kind, owner,
+      status, restart, input, max_crashes, lease_token, started_at)
+    SELECT $1, r.id, $4, $5, $6, $7, r.owner, 'running', coalesce($8, r.restart), $9::json,
+      r.max_crashes, r.lease_token, now()
+    FROM ${runs} r WHERE r.id = $2 AND r.lease_token = $3 AND r.status = 'running' FOR SHARE`;
+  // A child its dead worker left unfinished, or one a drain put back. Its `restart` decides.
+  const takeChildSql = `UPDATE ${runs} c SET status = 'running', lease_token = $3,
+      crashes = c.crashes + (c.status = 'running')::int, updated_at = now()
+    WHERE c.id = $1 AND c.root_id = $2 AND c.status IN ('queued', 'running')
+      AND (c.restart <> 'fail' OR c.status = 'queued') AND ${rootHeld}
+    RETURNING c.crashes, CASE WHEN c.restart = 'resume' THEN c.checkpoint END AS checkpoint`;
+  const endChildSql = `WITH done AS (
+      UPDATE ${runs} c SET status = $4, result = $5::json, error = $6::json, lease_token = NULL,
+        finished_at = now(), updated_at = now()
+      WHERE ${heldChild} RETURNING c.id, c.status, c.result, c.error),
+    ended AS (INSERT INTO ${events} (run_id, seq, type, data)
+      SELECT id, $7, 'end', json_build_object('status', status, 'error', error) FROM done)
+    SELECT result FROM done`;
 
   // What every way of ending a root shares. Whatever is still open below it ends too: cancelled
   // under a cancelled root, interrupted otherwise. Each run that ended gets its closing event in
@@ -270,6 +395,14 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         AND lease_until < now()
         AND (restart = 'fail' OR crashes >= max_crashes OR cancel_requested_at IS NOT NULL)
       ORDER BY lease_until LIMIT $2 FOR UPDATE)`);
+
+  // A queued run ends now. A running one is flagged, and its worker stops it at its next heartbeat.
+  const cancelQueuedSql = closeTree(`UPDATE ${runs} SET status = 'cancelled',
+      cancel_requested_at = now(), finished_at = now(), updated_at = now()
+    WHERE id = $1 AND parent_id IS NULL AND status = 'queued'`);
+  const cancelRunningSql = `UPDATE ${runs} SET cancel_requested_at = coalesce(cancel_requested_at,
+      now()), updated_at = now()
+    WHERE id = $1 AND parent_id IS NULL AND status = 'running'`;
 
   const stateSql = `SELECT status IN ('succeeded', 'failed', 'cancelled') AS finished
     FROM ${runs} WHERE id = $1`;
@@ -314,26 +447,42 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
     };
   }
 
-  function runOf(tree: Tree, node: Node, row: ClaimedRow): Run {
+  /** One fenced write by `node`. A write the fence refuses aborts the tree and throws `lost`. */
+  async function write(
+    tree: Tree,
+    node: Node,
+    sql: { root: string; child: string },
+    value: unknown,
+  ): Promise<void> {
+    const { signal } = tree.controller;
+    if (stopCode(signal) === "lost") throw signal.reason;
+    const { rowCount } = await pool.query(node.depth === 0 ? sql.root : sql.child, [
+      node.id,
+      tree.rootId,
+      tree.token,
+      value,
+    ]);
+    if (rowCount !== 1) throw lose(tree);
+  }
+
+  function runOf(tree: Tree, node: Node, row: RunRow): Run {
     const { signal } = tree.controller;
     return {
       id: node.id,
-      owner: row.owner,
+      owner: tree.owner,
       input: row.input,
       checkpoint: row.checkpoint,
       resumed: row.resumed,
       crashes: row.crashes,
       signal,
-      async save(state) {
-        if (stopCode(signal) === "lost") throw signal.reason;
-        const { rowCount } = await pool.query(saveSql, [
-          node.id,
-          tree.rootId,
-          tree.token,
-          JSON.stringify(state) ?? null,
-        ]);
-        if (rowCount !== 1) throw lose(tree);
+      save: (state) => write(tree, node, saveSql, JSON.stringify(state) ?? null),
+      async spend(usd) {
+        if (!(Number.isFinite(usd) && usd >= 0))
+          throw new TypeError(`spend takes a number of US dollars, 0 or more, not ${usd}`);
+        await write(tree, node, spendSql, usd);
+        tree.spent += usd;
       },
+      child: (key, spec, fn) => runChild(tree, node, key, spec, fn),
       emit(type, data) {
         let text: string | null;
         try {
@@ -365,13 +514,11 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
     };
   }
 
-  async function finish(tree: Tree, kind: string, outcome: Attempt): Promise<DriveOutcome> {
-    const stop = stopCode(tree.controller.signal);
-    if (stop === "lost") return "lost";
-    let result: string | null = null;
+  /** How a handler's outcome is kept. A failure goes to `onError` too, with its stack. */
+  function verdict(signal: AbortSignal, id: string, kind: string, outcome: Attempt): Verdict {
     if (outcome.ok) {
       try {
-        result = JSON.stringify(outcome.value) ?? null;
+        return { status: "succeeded", result: JSON.stringify(outcome.value) ?? null, error: null };
       } catch (cause) {
         outcome = {
           ok: false,
@@ -379,15 +526,22 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         };
       }
     }
-    if (!outcome.ok && stop !== "cancelled")
-      onError(new Error(`Run ${tree.rootId} (${kind}) failed`, { cause: outcome.error }));
-    const error: RunError | null = outcome.ok
-      ? null
-      : { code: "handler", message: messageOf(outcome.error) };
+    if (stopCode(signal) === "cancelled") return { status: "cancelled", result: null, error: null };
+    onError(new Error(`Run ${id} (${kind}) failed`, { cause: outcome.error }));
+    return {
+      status: "failed",
+      result: null,
+      error: { code: "handler", message: messageOf(outcome.error) },
+    };
+  }
+
+  async function finish(tree: Tree, kind: string, outcome: Attempt): Promise<DriveOutcome> {
+    if (stopCode(tree.controller.signal) === "lost") return "lost";
+    const { status, result, error } = verdict(tree.controller.signal, tree.rootId, kind, outcome);
     const { rows } = await pool.query<{ status: "succeeded" | "failed" | "cancelled" }>(finishSql, [
       tree.rootId,
       tree.token,
-      outcome.ok ? "succeeded" : "failed",
+      status,
       result,
       error && JSON.stringify(error),
     ]);
@@ -398,6 +552,93 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
     return "lost";
   }
 
+  async function runChild<T>(
+    tree: Tree,
+    parent: Node,
+    key: string,
+    spec: ChildSpec,
+    fn: (run: Run) => Promise<T>,
+  ): Promise<ChildResult<T>> {
+    const { signal } = tree.controller;
+    const stop = stopCode(signal);
+    if (stop === "cancelled") return { ok: false, error: { code: "cancelled" } };
+    if (stop) throw signal.reason;
+    if (parent.keys.has(key))
+      throw new Error(
+        `Run ${parent.id} already has a child "${key}" running. Give each child its own key.`,
+      );
+    parent.keys.add(key);
+    try {
+      const found = (await pool.query<FoundChild<T>>(findChildSql, [parent.id, key])).rows[0];
+      if (found?.status === "succeeded") return { ok: true, value: found.result };
+      if (found?.status === "failed" || found?.status === "cancelled")
+        return { ok: false, error: found.error ?? { code: "cancelled" } };
+
+      const node = nodeOf(found?.id ?? crypto.randomUUID(), parent.depth + 1);
+      let row: RunRow = { input: spec.input, checkpoint: null, resumed: false, crashes: 0 };
+      if (found) {
+        node.seq = (await pool.query<{ seq: number }>(lastSeqSql, [node.id])).rows[0]?.seq ?? 0;
+        const taken = (
+          await pool.query<{ crashes: number; checkpoint: unknown }>(takeChildSql, [
+            node.id,
+            tree.rootId,
+            tree.token,
+          ])
+        ).rows[0];
+        // Its restart is `fail`, or the tree is lost, which this write finds out.
+        if (!taken) return await endChild<T>(tree, node, INTERRUPTED);
+        row = { ...row, ...taken, resumed: true };
+      } else {
+        const refused = refusal(tree, node.depth);
+        if (refused) return { ok: false, error: refused };
+        // Counted before the insert, so children started together count each other.
+        tree.children++;
+        const { rowCount } = await pool.query(addChildSql, [
+          node.id,
+          tree.rootId,
+          tree.token,
+          parent.id,
+          key,
+          node.depth,
+          spec.kind,
+          spec.restart ?? null,
+          JSON.stringify(spec.input ?? null),
+        ]);
+        if (rowCount !== 1) throw lose(tree);
+      }
+
+      const outcome = await inSlot(tree.slots, parent, node, () =>
+        attempt(() => fn(runOf(tree, node, row))),
+      );
+      await node.appends;
+      if (stopCode(signal) === "lost") throw signal.reason;
+      return await endChild<T>(tree, node, verdict(signal, node.id, spec.kind, outcome));
+    } finally {
+      parent.keys.delete(key);
+    }
+  }
+
+  /** Ends a child with its closing event, and reads its result back from the row. */
+  async function endChild<T>(
+    tree: Tree,
+    node: Node,
+    { status, result, error }: Verdict,
+  ): Promise<ChildResult<T>> {
+    const { rows } = await pool.query<{ result: T }>(endChildSql, [
+      node.id,
+      tree.rootId,
+      tree.token,
+      status,
+      result,
+      error && JSON.stringify(error),
+      node.seq + 1,
+    ]);
+    const ended = rows[0];
+    if (!ended) throw lose(tree);
+    if (status === "succeeded") return { ok: true, value: ended.result };
+    return { ok: false, error: error ?? { code: "cancelled" } };
+  }
+
   return {
     /**
      * Adds a queued run and returns its id. Pass your transaction's client to create it with the
@@ -405,11 +646,24 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
      * (pg-boss), as the README shows.
      */
     async create(spec: RunSpec, client: Pick<Pool, "query"> = pool): Promise<{ id: string }> {
-      const { kind, owner, input, restart = "fail", maxCrashes = 5 } = spec;
+      const { kind, owner, input, restart = "fail", maxCrashes = 5, limits = {} } = spec;
       if (!RESTART_POLICIES.has(restart))
         throw new TypeError(`restart is "fail", "restart" or "resume", not "${restart}"`);
       if (!(Number.isInteger(maxCrashes) && maxCrashes >= 0))
         throw new TypeError(`maxCrashes is a whole number of 0 or more, not ${maxCrashes}`);
+      for (const name of LIMIT_NAMES) {
+        const value = limits[name];
+        const least = name === "maxParallel" ? 1 : 0;
+        const whole = name !== "budgetUsd";
+        if (
+          value !== undefined &&
+          !(Number.isFinite(value) && value >= least && (!whole || Number.isInteger(value)))
+        )
+          throw new TypeError(
+            `limits.${name} is ${whole ? "a whole number" : "a number"} of ${least} or more, ` +
+              `not ${value}`,
+          );
+      }
       const id = crypto.randomUUID();
       await client.query(createSql, [
         id,
@@ -418,6 +672,7 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         restart,
         JSON.stringify(input ?? null),
         maxCrashes,
+        JSON.stringify(limits),
       ]);
       return { id };
     },
@@ -442,8 +697,20 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         return rows[0]?.status ?? "skipped";
       }
       const { rows } = await pool.query<{ seq: number }>(lastSeqSql, [runId]);
-      const tree: Tree = { rootId: runId, token, controller: new AbortController() };
-      const root: Node = { id: runId, seq: rows[0]?.seq ?? 0, appends: Promise.resolve() };
+      const { owner, limits, children, spent } = claimed;
+      const tree: Tree = {
+        rootId: runId,
+        token,
+        owner,
+        controller: new AbortController(),
+        limits,
+        children,
+        spent,
+        ...(limits.maxParallel !== undefined && {
+          slots: { free: limits.maxParallel, queue: [] },
+        }),
+      };
+      const root = nodeOf(runId, 0, rows[0]?.seq);
       const release = holdLease(tree);
       try {
         const handler = Object.hasOwn(handlers, claimed.kind) ? handlers[claimed.kind] : undefined;
@@ -459,6 +726,19 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
       } finally {
         release();
       }
+    },
+
+    /**
+     * Cancels a run and everything under it. A queued run ends at once. A running one is flagged,
+     * and its worker aborts `run.signal` with code `cancelled` at its next heartbeat, within
+     * `leaseSecs / 3` (10 seconds by default). A run whose worker died ends here. False when the run
+     * had already finished, or does not exist.
+     */
+    async cancel(runId: string): Promise<boolean> {
+      if ((await pool.query(cancelQueuedSql, [runId])).rows.length > 0) return true;
+      if ((await pool.query(cancelRunningSql, [runId])).rowCount !== 1) return false;
+      await pool.query(expireSql, [runId, 1]);
+      return true;
     },
 
     /**
@@ -489,6 +769,97 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
       }
     },
   };
+}
+
+const INTERRUPTED: Verdict = { status: "failed", result: null, error: { code: "interrupted" } };
+
+/** Why the tree may not start one more child at `depth`, when it may not. */
+function refusal(tree: Tree, depth: number): RunError | undefined {
+  const { maxDepth, maxChildren, budgetUsd } = tree.limits;
+  if (maxDepth !== undefined && depth > maxDepth)
+    return {
+      code: "max_depth",
+      message: `A child here would be at depth ${depth}. maxDepth is ${maxDepth}.`,
+    };
+  if (maxChildren !== undefined && tree.children >= maxChildren)
+    return {
+      code: "max_children",
+      message: `The tree already started ${tree.children} children. maxChildren is ${maxChildren}.`,
+    };
+  if (budgetUsd !== undefined && tree.spent >= budgetUsd)
+    return {
+      code: "budget",
+      message: `The tree spent $${Number(tree.spent.toFixed(6))} of its $${budgetUsd} budget.`,
+    };
+  return undefined;
+}
+
+function nodeOf(id: string, depth: number, seq = 0): Node {
+  return {
+    id,
+    depth,
+    seq,
+    appends: Promise.resolve(),
+    keys: new Set(),
+    busy: false,
+    waiting: 0,
+    slot: "none",
+  };
+}
+
+/** Runs `work` for `node`, a child of `parent`, inside the tree's `maxParallel`. */
+async function inSlot<R>(
+  slots: Slots | undefined,
+  parent: Node,
+  node: Node,
+  work: () => Promise<R>,
+): Promise<R> {
+  parent.waiting++;
+  await fit(slots, parent);
+  node.busy = true;
+  await fit(slots, node);
+  try {
+    return await work();
+  } finally {
+    node.busy = false;
+    await fit(slots, node);
+    parent.waiting--;
+    await fit(slots, parent);
+  }
+}
+
+/**
+ * Gives `node` a slot of the tree's `maxParallel` while its function runs and waits on no child of
+ * its own, and takes it back otherwise. Call it after each change to `busy` or `waiting`. A child
+ * waiting on its children lends its slot to them, so a tree can never wait on itself.
+ */
+async function fit(slots: Slots | undefined, node: Node): Promise<void> {
+  if (!slots || node.depth === 0) return;
+  const wants = () => node.busy && node.waiting === 0;
+  if (wants() && node.slot === "none") {
+    node.slot = "asking";
+    await take(slots);
+    node.slot = "held";
+  }
+  // Also after the wait above: it may have started a child meanwhile.
+  if (!wants() && node.slot === "held") {
+    node.slot = "none";
+    give(slots);
+  }
+}
+
+function take(slots: Slots): Promise<void> {
+  if (slots.free > 0) {
+    slots.free--;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => slots.queue.push(resolve));
+}
+
+function give(slots: Slots): void {
+  const next = slots.queue.shift();
+  if (next) next();
+  else slots.free++;
 }
 
 function stopCode(signal: AbortSignal): StopCode | undefined {

@@ -1021,6 +1021,48 @@ app.get("/runs/:id/events", async (c) => {
 A client that reconnects sends its `Last-Event-ID`, and picks up after the last event it saw. A
 tail reads the table once a second, so an event can reach it up to a second late.
 
+**Children.** `run.child(key, spec, fn)` runs `fn` as a child run, with its own row, events and
+checkpoint. It runs in the same process, under the root's lease. `limits` on the root cap the
+whole tree:
+
+```ts
+const { id } = await runs.create({
+  kind: "report",
+  owner: userId,
+  input: { topics },
+  restart: "resume",
+  limits: { maxParallel: 3, maxChildren: 8, maxDepth: 2, budgetUsd: 1.5 },
+});
+
+// In the handler:
+const found = await Promise.all(
+  topics.map((topic) =>
+    run.child(topic, { kind: "search", input: { topic } }, async (child) => {
+      const { notes, usd } = await search(topic, child.signal);
+      await child.spend(usd);
+      return notes;
+    }),
+  ),
+);
+const notes = found.flatMap((result) => (result.ok ? [result.value] : []));
+```
+
+- A child is kept under its parent and its `key`. After a restart, a child that already finished
+  is not run again: `child` returns its stored result. A child the dead worker left unfinished goes
+  by its own `restart`, which is the root's unless you set it.
+- `child` never throws for what the child did. It returns `{ ok: true, value }`, or
+  `{ ok: false, error }` where `error.code` is `handler` (it threw), `interrupted` or `cancelled`.
+- A child past a limit is refused before it starts, with code `max_depth`, `max_children` or
+  `budget`. `maxParallel` caps the children running at once. A child waiting on its own children
+  lends them its place, so a deep tree never waits on itself.
+- `run.spend(usd)` adds to the tree's spend, and the total is read back at every claim. A resumed
+  run counts what it spent before, so it cannot buy past `budgetUsd` a second time.
+
+**Cancel.** `runs.cancel(id)` stops a run and every child under it. A queued run ends at once. A
+running one finds out at its worker's next heartbeat, within 10 seconds: `run.signal` aborts with
+code `cancelled`, and the run ends `cancelled` unless it already finished its work. It returns
+false when the run had already finished. Check that the run belongs to the caller first.
+
 **On BullMQ**, add the job after the transaction that created the run has committed, or a worker
 can take it before the row is there:
 

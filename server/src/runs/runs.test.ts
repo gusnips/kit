@@ -352,6 +352,254 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     expect(seen).toEqual([]);
   });
 
+  const childOf = async (parentId: string, key: string) =>
+    (
+      await pool.query<{ id: string }>(
+        "SELECT id FROM app.runs WHERE parent_id = $1 AND child_key = $2",
+        [parentId, key],
+      )
+    ).rows[0]?.id ?? "";
+
+  it("never runs a finished child again, and resumes the one its dead worker left", async () => {
+    const { id } = await store().create({ ...SPEC, restart: "resume" });
+    const calls: string[] = [];
+    const started = gate();
+    const stuck = gate();
+    const first = store().drive(id, {
+      report: async (run) => {
+        await run.child("a", { kind: "search", input: 1 }, async () => {
+          calls.push("a");
+          return { found: 3 };
+        });
+        return run.child("b", { kind: "write", input: 2 }, async (b) => {
+          calls.push("b");
+          b.emit("draft", 1);
+          await b.save({ page: 1 });
+          started.open();
+          await stuck.opened;
+          return "late";
+        });
+      },
+    });
+    await started.opened;
+    const b = await childOf(id, "b");
+    await eventually(async () => (await eventsOf(b)).length === 1);
+    await expireLease(id);
+
+    const seen: Pick<Run, "resumed" | "crashes" | "checkpoint">[] = [];
+    const outcome = await store().drive(id, {
+      report: async (run) => ({
+        a: await run.child("a", { kind: "search", input: 1 }, async () => calls.push("a again")),
+        b: await run.child("b", { kind: "write", input: 2 }, async (child) => {
+          seen.push({
+            resumed: child.resumed,
+            crashes: child.crashes,
+            checkpoint: child.checkpoint,
+          });
+          child.emit("draft", 2);
+          return "done";
+        }),
+      }),
+    });
+
+    expect(outcome).toBe("succeeded");
+    expect(calls).toEqual(["a", "b"]);
+    expect(seen).toEqual([{ resumed: true, crashes: 1, checkpoint: { page: 1 } }]);
+    expect(JSON.parse((await rowOf(id))?.result ?? "")).toEqual({
+      a: { ok: true, value: { found: 3 } },
+      b: { ok: true, value: "done" },
+    });
+    expect(await eventsOf(b)).toEqual([
+      { seq: 1, type: "draft", data: 1 },
+      { seq: 2, type: "draft", data: 2 },
+      { seq: 3, type: "end", data: { status: "succeeded", error: null } },
+    ]);
+    stuck.open();
+    expect(await first).toBe("lost");
+  });
+
+  it("hands a child's failure back as data, and refuses a key already running", async () => {
+    const runs = store();
+    const { id } = await runs.create(SPEC);
+    const outcome = await runs.drive(id, {
+      report: async (run) => {
+        const failed = await run.child("a", { kind: "search", input: null }, async () => {
+          throw new Error("no results");
+        });
+        const twice = Promise.all([
+          run.child("b", { kind: "search", input: null }, async () => "one"),
+          run.child("b", { kind: "search", input: null }, async () => "two"),
+        ]);
+        await expect(twice).rejects.toThrow('already has a child "b" running');
+        return failed;
+      },
+    });
+    expect(outcome).toBe("succeeded");
+    expect(JSON.parse((await rowOf(id))?.result ?? "")).toEqual({
+      ok: false,
+      error: { code: "handler", message: "no results" },
+    });
+    expect(await eventsOf(await childOf(id, "a"))).toEqual([
+      {
+        seq: 1,
+        type: "end",
+        data: { status: "failed", error: { code: "handler", message: "no results" } },
+      },
+    ]);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).cause).toMatchObject({ message: "no results" });
+  });
+
+  it("cancels a queued run at once, and a running one with every child under it", async () => {
+    const runs = store({ leaseSecs: 0.3 });
+    const queued = await runs.create(SPEC);
+    expect(await runs.cancel(queued.id)).toBe(true);
+    expect(await rowOf(queued.id)).toMatchObject({ status: "cancelled" });
+    expect(await eventsOf(queued.id)).toEqual([
+      { seq: 1, type: "end", data: { status: "cancelled", error: null } },
+    ]);
+    expect(await runs.drive(queued.id, {})).toBe("skipped");
+
+    const { id } = await runs.create(SPEC);
+    const reached = gate();
+    let leaf: AbortSignal | undefined;
+    const driving = runs.drive(id, {
+      report: async (run) => {
+        const child = await run.child("plan", { kind: "plan", input: null }, async (plan) => {
+          const grandchild = await plan.child("search", { kind: "search", input: null }, (r) => {
+            leaf = r.signal;
+            reached.open();
+            return new Promise((_, reject) =>
+              r.signal.addEventListener("abort", () => reject(r.signal.reason)),
+            );
+          });
+          if (!grandchild.ok) throw new Error(grandchild.error.code);
+        });
+        if (!child.ok) throw new Error(child.error.code);
+      },
+    });
+    await reached.opened;
+    expect(await runs.cancel(id)).toBe(true);
+    expect(await driving).toBe("cancelled");
+    expect(leaf?.reason).toMatchObject({ code: "cancelled" });
+
+    const { rows } = await pool.query<{ id: string; depth: number; status: string }>(
+      "SELECT id, depth, status FROM app.runs WHERE root_id = $1 ORDER BY depth",
+      [id],
+    );
+    expect(rows.map(({ depth, status }) => [depth, status])).toEqual([
+      [0, "cancelled"],
+      [1, "cancelled"],
+      [2, "cancelled"],
+    ]);
+    for (const row of rows)
+      expect((await eventsOf(row.id)).at(-1)?.data).toEqual({ status: "cancelled", error: null });
+    expect(await runs.cancel(id)).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
+  it("refuses a new child past the budget, with what earlier attempts spent counted", async () => {
+    const { id } = await store().create({ ...SPEC, restart: "resume", limits: { budgetUsd: 1 } });
+    const spent = gate();
+    const stuck = gate();
+    const first = store().drive(id, {
+      report: async (run) => {
+        await run.spend(0.6);
+        await run.child("a", { kind: "search", input: null }, (child) => child.spend(0.5));
+        spent.open();
+        await stuck.opened;
+      },
+    });
+    await spent.opened;
+    await expireLease(id);
+
+    let ran = false;
+    await store().drive(id, {
+      report: (run) =>
+        run.child("b", { kind: "search", input: null }, async () => {
+          ran = true;
+        }),
+    });
+    expect(ran).toBe(false);
+    expect(JSON.parse((await rowOf(id))?.result ?? "")).toEqual({
+      ok: false,
+      error: { code: "budget", message: "The tree spent $1.1 of its $1 budget." },
+    });
+    expect(await childOf(id, "b")).toBe("");
+    stuck.open();
+    expect(await first).toBe("lost");
+  });
+
+  it("refuses a child past maxDepth or maxChildren", async () => {
+    const runs = store();
+    const { id } = await runs.create({ ...SPEC, limits: { maxDepth: 1, maxChildren: 2 } });
+    await runs.drive(id, {
+      report: async (run) => {
+        const deep = await run.child("a", { kind: "plan", input: null }, (child) =>
+          child.child("deep", { kind: "search", input: null }, async () => "never"),
+        );
+        const both = await Promise.all(
+          ["b", "c"].map((key) => run.child(key, { kind: "search", input: null }, async () => key)),
+        );
+        return { deep, both };
+      },
+    });
+    expect(JSON.parse((await rowOf(id))?.result ?? "")).toEqual({
+      deep: {
+        ok: true,
+        value: {
+          ok: false,
+          error: { code: "max_depth", message: "A child here would be at depth 2. maxDepth is 1." },
+        },
+      },
+      both: [
+        { ok: true, value: "b" },
+        {
+          ok: false,
+          error: {
+            code: "max_children",
+            message: "The tree already started 2 children. maxChildren is 2.",
+          },
+        },
+      ],
+    });
+  });
+
+  it.each([1, 2])(
+    "runs at most maxParallel %i children at once, and a tree deeper than that finishes",
+    async (maxParallel) => {
+      const runs = store();
+      const { id } = await runs.create({ ...SPEC, limits: { maxParallel } });
+      let now = 0;
+      let peak = 0;
+      const leaf = async () => {
+        peak = Math.max(peak, ++now);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        now--;
+        return "leaf";
+      };
+      const outcome = await runs.drive(id, {
+        report: (run) =>
+          Promise.all(
+            ["a", "b", "c"].map((key) =>
+              run.child(key, { kind: "plan", input: null }, (child) =>
+                Promise.all(
+                  ["x", "y"].map((sub) => child.child(sub, { kind: "search", input: null }, leaf)),
+                ),
+              ),
+            ),
+          ),
+      });
+      expect(outcome).toBe("succeeded");
+      expect(peak).toBe(maxParallel);
+      const { rows } = await pool.query(
+        "SELECT 1 FROM app.runs WHERE root_id = $1 AND status = 'succeeded'",
+        [id],
+      );
+      expect(rows).toHaveLength(10);
+    },
+  );
+
   it("creates the run inside the caller's transaction", async () => {
     const runs = store();
     const client = await pool.connect();
@@ -371,5 +619,18 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     expect(() => store({ events: "app.run events" })).toThrow(TypeError);
     for (const leaseSecs of [0, 31, Number.NaN])
       expect(() => store({ leaseSecs })).toThrow("leaseSecs must be above 0 and at most 30");
+  });
+
+  it("refuses a limit that is not a count, or a maxParallel of 0", async () => {
+    const runs = store();
+    await expect(runs.create({ ...SPEC, limits: { maxParallel: 0 } })).rejects.toThrow(
+      "limits.maxParallel is a whole number of 1 or more, not 0",
+    );
+    await expect(runs.create({ ...SPEC, limits: { maxChildren: 1.5 } })).rejects.toThrow(
+      "limits.maxChildren is a whole number of 0 or more, not 1.5",
+    );
+    await expect(runs.create({ ...SPEC, limits: { budgetUsd: -1 } })).rejects.toThrow(
+      "limits.budgetUsd is a number of 0 or more, not -1",
+    );
   });
 });

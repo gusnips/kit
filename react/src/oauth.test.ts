@@ -1,12 +1,15 @@
 // @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, createElement } from "react";
+import { act, createElement, type ChangeEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApiClient } from "./api-client.ts";
 import {
+  createOAuthConsoleApi,
   formatUserCode,
   useConsentRequest,
   useDeviceApproval,
+  useDeviceCodeField,
   type ConsentApi,
   type ConsentView,
   type DeviceApi,
@@ -97,6 +100,17 @@ describe("useConsentRequest", () => {
     expect(page.current.leaving).toBe(true);
   });
 
+  it("hands the page whatever its server adds to the view, typed", async () => {
+    const api: ConsentApi<string, { spaces: string[] }> = {
+      describe: async () => ({ ...VIEW, spaces: ["ws-1", "ws-2"] }),
+      approve: async () => ({ ok: true, redirectTo: "https://claude.ai/cb" }),
+    };
+    const page = mount(() => useConsentRequest(api, "?client_id=x"));
+    await settle();
+    const { state } = page.current;
+    expect(state.status === "ready" ? state.view.spaces : null).toEqual(["ws-1", "ws-2"]);
+  });
+
   it("shows a refusal as a state and never redirects on it", async () => {
     const assign = vi.spyOn(window.location, "assign").mockImplementation(() => {});
     const page = mount(() =>
@@ -173,14 +187,14 @@ const DEVICE: DeviceView = {
   expiresAt: "2026-10-16T12:10:00.000Z",
 };
 
-describe("useDeviceApproval", () => {
-  function deviceApi(overrides: Partial<DeviceApi> = {}) {
-    return {
-      describe: vi.fn<DeviceApi["describe"]>(overrides.describe ?? (async () => DEVICE)),
-      decide: vi.fn<DeviceApi["decide"]>(overrides.decide ?? (async () => ({ ok: true }))),
-    };
-  }
+function deviceApi(overrides: Partial<DeviceApi> = {}) {
+  return {
+    describe: vi.fn<DeviceApi["describe"]>(overrides.describe ?? (async () => DEVICE)),
+    decide: vi.fn<DeviceApi["decide"]>(overrides.decide ?? (async () => ({ ok: true }))),
+  };
+}
 
+describe("useDeviceApproval", () => {
   it("starts from the link's code, asks the server, and stays approved after the yes", async () => {
     const api = deviceApi();
     const page = mount(() => useDeviceApproval(api, "?code=wdjb-mjht"));
@@ -191,7 +205,7 @@ describe("useDeviceApproval", () => {
 
     act(() => page.current.approve());
     await settle();
-    expect(api.decide).toHaveBeenCalledWith("WDJBMJHT", "approve");
+    expect(api.decide).toHaveBeenCalledWith("WDJBMJHT", "approve", undefined);
     expect(page.current.state).toEqual({ status: "approved" });
 
     // A refetch on focus would now hear "unknown code". It must not be asked.
@@ -218,11 +232,13 @@ describe("useDeviceApproval", () => {
   });
 
   it("says no, and shows a code the server does not know as refused", async () => {
-    const said = mount(() => useDeviceApproval(deviceApi(), "?code=WDJBMJHT"));
+    const api = deviceApi();
+    const said = mount(() => useDeviceApproval(api, "?code=WDJBMJHT"));
     await settle();
     act(() => said.current.deny());
     await settle();
     expect(said.current.state).toEqual({ status: "denied" });
+    expect(api.decide).toHaveBeenCalledWith("WDJBMJHT", "deny", undefined);
 
     const unknown: OAuthRefusal = { ok: false, reason: "unknown-code", message: "expired" };
     const gone = mount(() =>
@@ -243,6 +259,137 @@ describe("useDeviceApproval", () => {
     act(() => page.current.setCode("BCDF GHJK"));
     await settle();
     expect(page.current.state.status).toBe("ready");
+  });
+});
+
+describe("useDeviceApproval with a choice", () => {
+  it("sends the page's choice with the yes, and names the pressed button until it answers", async () => {
+    let release!: () => void;
+    const decide = vi.fn<DeviceApi<string>["decide"]>(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ok: true });
+        }),
+    );
+    const page = mount(() =>
+      useDeviceApproval({ describe: async () => DEVICE, decide }, "?code=WDJBMJHT"),
+    );
+    await settle();
+    expect(page.current.pending).toBeNull();
+
+    act(() => page.current.approve("ws-1"));
+    await settle();
+    expect(decide).toHaveBeenCalledWith("WDJBMJHT", "approve", "ws-1");
+    expect(page.current.pending).toBe("approve");
+
+    release();
+    await settle();
+    expect(page.current.pending).toBeNull();
+    expect(page.current.state).toEqual({ status: "approved" });
+  });
+});
+
+/** The one part of a change event the field reads. A test-only cast: the hook takes React's own. */
+const changeTo = (value: string) => ({ target: { value } }) as ChangeEvent<HTMLInputElement>;
+
+describe("useDeviceCodeField", () => {
+  it("wires the field to its status line and keeps the code in the address until decided", async () => {
+    window.history.replaceState({ idx: 3 }, "", "/device?from=mail&code=wdjbmjht");
+    const api = deviceApi();
+    const page = mount(() => {
+      const device = useDeviceApproval(api, window.location.search);
+      return { device, field: useDeviceCodeField(device) };
+    });
+    await settle();
+    const { inputProps, statusProps } = page.current.field;
+    expect(inputProps).toMatchObject({
+      value: "WDJB-MJHT",
+      autoFocus: false,
+      disabled: false,
+      "aria-invalid": false,
+      "aria-describedby": statusProps.id,
+    });
+    expect(inputProps.id).not.toBe(statusProps.id);
+    expect(window.location.search).toBe("?from=mail&code=WDJB-MJHT");
+    // Replaced with the router's own entry state, or its next Back lands on the wrong page.
+    expect(window.history.state).toEqual({ idx: 3 });
+    expect(window.history.length).toBe(1);
+
+    act(() => page.current.field.inputProps.onChange(changeTo("bcda")));
+    expect(page.current.field.inputProps["aria-invalid"]).toBe(true);
+    expect(window.location.search).toBe("?from=mail&code=BCDA");
+
+    act(() => page.current.field.inputProps.onChange(changeTo("wdjb mjht")));
+    await settle();
+    act(() => page.current.device.approve());
+    await settle();
+    expect(page.current.device.state).toEqual({ status: "approved" });
+    // The server no longer knows the code: a reload must not ask about it and say it is wrong.
+    expect(window.location.search).toBe("?from=mail");
+  });
+
+  it("focuses the field only when it starts empty", () => {
+    window.history.replaceState(null, "", "/device");
+    const page = mount(() => useDeviceCodeField(useDeviceApproval(deviceApi(), "")));
+    expect(page.current.inputProps.autoFocus).toBe(true);
+    expect(window.location.search).toBe("");
+  });
+});
+
+describe("createOAuthConsoleApi", () => {
+  function client() {
+    const sent: { url: string; method?: string; body?: BodyInit | null }[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      sent.push({ url: String(url), method: init?.method, body: init?.body });
+      return new Response(JSON.stringify({ data: { ok: true } }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const http = createApiClient({
+      baseUrl: "https://api.test",
+      session: {
+        getToken: async () => "token",
+        refresh: async () => ({ token: "token", reachedAuth: true }),
+        signOut: async () => {},
+      },
+      onSessionDead: () => {},
+    });
+    return { http, sent };
+  }
+
+  it("calls the server's console routes through the app's own client", async () => {
+    const { http, sent } = client();
+    const api = createOAuthConsoleApi<string>(http, "/auth/oauth");
+    await api.consent.describe("client_id=x&state=s");
+    await api.consent.approve("client_id=x&state=s", "ws-1");
+    await api.device.describe("WDJBMJHT");
+    await api.device.decide("WDJBMJHT", "approve", "ws-1");
+    await api.device.decide("WDJBMJHT", "deny");
+    expect(sent).toEqual([
+      { url: "https://api.test/auth/oauth/request?client_id=x&state=s", method: "GET" },
+      {
+        url: "https://api.test/auth/oauth/approve",
+        method: "POST",
+        body: '{"query":"client_id=x&state=s","choice":"ws-1"}',
+      },
+      { url: "https://api.test/auth/oauth/device?code=WDJBMJHT", method: "GET" },
+      {
+        url: "https://api.test/auth/oauth/device",
+        method: "POST",
+        body: '{"code":"WDJBMJHT","decision":"approve","choice":"ws-1"}',
+      },
+      {
+        url: "https://api.test/auth/oauth/device",
+        method: "POST",
+        body: '{"code":"WDJBMJHT","decision":"deny"}',
+      },
+    ]);
+  });
+
+  it("sends no choice when the page has none", async () => {
+    const { http, sent } = client();
+    await createOAuthConsoleApi(http, "/app/oauth").consent.approve("client_id=x");
+    expect(sent[0]?.body).toBe('{"query":"client_id=x"}');
   });
 });
 

@@ -245,7 +245,7 @@ dedup, the same as in the frontend packages.
         ├── unsubscribe.ts← listUnsubscribeHeaders(): both one-click headers, for any sender
         ├── text-from-html.ts ← textFromHtml(): a mail's text part from its HTML, addresses kept
         ├── env.ts        ← validateEnv(): every problem with the environment, in one error
-        ├── node/         ← the one directory allowed Node: fetchPublic(), scryptSealKey(), the API key codec and the drain
+        ├── node/         ← the one directory allowed Node: fetchPublic(), scryptSealKey(), the API key codec, the OAuth secret and client fetch, and the drain
         │   ├── mail/     ← createMailer(), the /mail subpath: SMTP needs a socket a Worker lacks
         │   └── express/  ← fromHono(), the /express subpath: a Hono app inside an Express one
         └── __tests__/    ← the throwaway redis-server the Redis and BullMQ suites share

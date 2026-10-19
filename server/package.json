@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/server",
-  "version": "0.13.1",
+  "version": "0.14.1",
   "description": "The layer under a TypeScript backend: one error shape, one response envelope, one retry rule, one logger.",
   "type": "module",
   "license": "MIT",
@@ -45,6 +45,10 @@
     "./oauth": {
       "types": "./dist/oauth/index.d.ts",
       "default": "./dist/oauth/index.js"
+    },
+    "./oauth/testing": {
+      "types": "./dist/oauth/testing.d.ts",
+      "default": "./dist/oauth/testing.js"
     },
     "./mail": {
       "types": "./dist/node/mail/index.d.ts",

@@ -337,11 +337,11 @@ describe("useDeviceCodeField", () => {
 });
 
 describe("createOAuthConsoleApi", () => {
-  function client() {
+  function client(answer: (url: string) => unknown = () => ({ ok: true })) {
     const sent: { url: string; method?: string; body?: BodyInit | null }[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       sent.push({ url: String(url), method: init?.method, body: init?.body });
-      return new Response(JSON.stringify({ data: { ok: true } }), {
+      return new Response(JSON.stringify({ data: answer(String(url)) }), {
         headers: { "Content-Type": "application/json" },
       });
     });
@@ -390,6 +390,32 @@ describe("createOAuthConsoleApi", () => {
     const { http, sent } = client();
     await createOAuthConsoleApi(http, "/app/oauth").consent.approve("client_id=x");
     expect(sent[0]?.body).toBe('{"query":"client_id=x"}');
+  });
+
+  it("keeps the fields your server adds to each page's view", async () => {
+    type Workspaces = { workspaces: { id: string; name: string }[] };
+    type Account = { accountEmail: string };
+    const { http } = client((url) =>
+      url.includes("/request")
+        ? { ...VIEW, workspaces: [{ id: "ws-1", name: "Acme" }] }
+        : { ...DEVICE, accountEmail: "ana@example.com" },
+    );
+    const api = createOAuthConsoleApi<string, Workspaces, Account>(http, "/auth/oauth");
+    const consent = mount(() => useConsentRequest(api.consent, "?client_id=x"));
+    const device = mount(() => useDeviceApproval(api.device, "?code=WDJB-MJHT"));
+    await settle();
+    const consentState = consent.current.state;
+    const deviceState = device.current.state;
+    if (consentState.status !== "ready" || deviceState.status !== "ready")
+      throw new Error("A view never loaded");
+
+    // These read with no cast: the page keeps the types its server adds.
+    expect(consentState.view.workspaces[0]?.name).toBe("Acme");
+    expect(deviceState.view.accountEmail).toBe("ana@example.com");
+    // @ts-expect-error: the server sends no such field.
+    expect(consentState.view.plan).toBeUndefined();
+    // @ts-expect-error: the consent page's fields are not the device page's.
+    expect(deviceState.view.workspaces).toBeUndefined();
   });
 });
 

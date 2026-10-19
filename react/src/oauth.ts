@@ -304,11 +304,16 @@ export type OAuthConsoleHttp = Pick<ApiClient, "get" | "post">;
  *
  * Both pages' calls to the server's `oauthConsoleRoutes`, mounted at `basePath` behind your
  * sign-in. A choice travels as `choice`, which is where those routes hand it to your approver.
+ * `ConsentExtra` and `DeviceExtra` are the fields your server adds to each page's view.
  */
-export function createOAuthConsoleApi<Choice = void>(
+export function createOAuthConsoleApi<
+  Choice = void,
+  ConsentExtra extends object = object,
+  DeviceExtra extends object = object,
+>(
   http: OAuthConsoleHttp,
   basePath: string,
-): { consent: ConsentApi<Choice>; device: DeviceApi<Choice> } {
+): { consent: ConsentApi<Choice, ConsentExtra>; device: DeviceApi<Choice, DeviceExtra> } {
   return {
     consent: {
       describe: (query) => http.get(`${basePath}/request?${query}`),

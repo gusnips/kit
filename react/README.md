@@ -720,9 +720,14 @@ if (consent.state.status === "ready")
 
 If your routes are your own, pass your own two calls instead: `describe(query)` and
 `approve(query, choice)`. The choice is anything your page adds, such as a workspace, and it reaches
-the server's approver. With no choice, call `approve()`. When your server adds fields to the view,
-type them as the second parameter, `ConsentApi<Choice, { spaces: Space[] }>`, and
-`state.view.spaces` is typed too. `state.status` is `loading`, `refused`, `failed` or `ready`:
+the server's approver. With no choice, call `approve()`.
+
+When your server adds fields to the view, type them after the choice:
+`createOAuthConsoleApi<string, { spaces: Space[] }>(api, "/auth/oauth")`, and
+`state.view.spaces` is typed on the consent page. A third type does the same for the device page.
+With your own calls, it is `ConsentApi<Choice, { spaces: Space[] }>`.
+
+`state.status` is `loading`, `refused`, `failed` or `ready`:
 
 - **`refused`** means the request is not one to answer: an unknown app, or a return address it
   never registered. Show `refusal.message` (or your own words for `refusal.reason`) and a link

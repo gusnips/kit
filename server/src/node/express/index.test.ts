@@ -46,6 +46,9 @@ function api() {
   return { app, ran };
 }
 
+// Read before any test mounts a bridge, so a swap by an earlier test still shows.
+const { Request: OriginalRequest, Response: OriginalResponse } = globalThis;
+
 const servers: Array<{ close: () => void }> = [];
 afterEach(() => servers.splice(0).forEach((server) => server.close()));
 
@@ -96,6 +99,23 @@ describe("fromHono", () => {
       body: JSON.stringify({ a: 1 }),
     });
     expect(await legacy.json()).toEqual({ body: { a: 1 } });
+  });
+
+  it("leaves the process's Request and Response alone, so every other fetch keeps its own", async () => {
+    // getRequestListener swaps both globals for its own classes unless told not to, and that
+    // reaches every fetch the app makes, far from the API (measured).
+    const app = express();
+    app.use("/v1", fromHono(api().app));
+    const base = await serve(app);
+    expect(await (await fetch(`${base}/v1/things/7`)).json()).toEqual({
+      data: { params: { id: "7" }, input: {} },
+    });
+
+    expect(globalThis.Request).toBe(OriginalRequest);
+    expect(globalThis.Response).toBe(OriginalResponse);
+    const plain = await fetch(`${base}/v1/peer`);
+    expect(plain).toBeInstanceOf(OriginalResponse);
+    expect(await plain.text()).toMatch(/127\.0\.0\.1/);
   });
 
   it("refuses a request a body parser already read, instead of running it on an empty body", async () => {

@@ -851,3 +851,12 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     a request whose `body` a parser already set, with an error that says to move it. Both are
     planted-defect tested against a real Express. It sits in `src/node/` because it takes Node's
     request, and imports no Express: its request type is the two fields it reads.
+
+    **And it shipped with a third break of the same kind, which the first adopter's proof found.**
+    `getRequestListener` replaces the process's global `Request` and `Response` with its own
+    classes unless `overrideGlobalObjects` is `false`, and it does so when the listener is made, so
+    mounting the API changed every other fetch in the process, far from any route. The probe above
+    tested requests through the bridge and never looked at the globals. Through 0.14.1 `fromHono`
+    left it on. The test reads both globals before any bridge exists and checks them after one
+    serves, so a swap by any earlier test still shows; with the old call put back it fails on Node
+    and on Bun.

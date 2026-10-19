@@ -817,11 +817,19 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     matches only at the end (measured on Bun 1.4.2 and Node 24.21), so the three refused it all
     along. The test keeps the newline cases, as a pin, not as a fix.
 
-    **What did NOT come across, and why.** A sixth backend mints the same key in a Worker through
-    Web Crypto, which is async, and every Node caller hashes on the auth path synchronously. Three
-    mint 24 bytes in base64url, one of them showing 10 characters, and one mints 32 bytes with
-    8 characters shown from after the prefix: an encoding option comes when one of them adopts,
-    not before. Storage, owners, grants, caps and audit are each product's. And a create capped
+    **The second key came across when its adopters did (0.14.4).** Three more backends mint 24
+    bytes in base64url, also hashed with SHA-256 of the whole key, and one of them shows 10
+    characters. That is `encoding: "base64url"` and `displayLength`, and hex with 12 stays the
+    default, so the first five change nothing. A test pins one key per donor, in the shape its own
+    tests use, hashed with `shasum` outside the code. Seven planted defects each failed it: base64
+    for base64url, 16 bytes, `+` in the alphabet, the display length ignored, the hash of the
+    secret alone, the hex alphabet for base64url, and no cap on the display length. The cap is half
+    the secret, because the display prefix is stored in the clear.
+
+    **What did NOT come across, and why.** A sixth hex backend mints its key in a Worker through
+    Web Crypto, which is async, and every Node caller hashes on the auth path synchronously. One
+    mints 32 bytes with 8 characters shown from after the prefix, a third key that nobody else
+    mints. Storage, owners, grants, caps and audit are each product's. And a create capped
     per owner stays out: two copies say one `INSERT … SELECT count(*)` keeps concurrent creates
     under the cap, while nothing in it serializes the owner, so two creates can each count the
     snapshot before the other's insert. Nobody has measured it either way. It comes here only

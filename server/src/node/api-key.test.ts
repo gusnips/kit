@@ -80,3 +80,78 @@ describe("createApiKeyCodec", () => {
     expect(() => createApiKeyCodec({ prefix: "" })).toThrow(TypeError);
   });
 });
+
+describe("createApiKeyCodec, base64url", () => {
+  const b64 = createApiKeyCodec({ prefix: "ac_", encoding: "base64url" });
+
+  it("mints the prefix and 24 random bytes as 32 base64url characters, never the same twice", () => {
+    const keys = Array.from({ length: 500 }, b64.generateApiKey);
+    expect(new Set(keys).size).toBe(500);
+    for (const key of keys) {
+      expect(key).toMatch(/^ac_[A-Za-z0-9_-]{32}$/);
+      expect(Buffer.from(key.slice(3), "base64url")).toHaveLength(24);
+      expect(b64.isWellFormedApiKey(key)).toBe(true);
+    }
+  });
+
+  // One key per donor in the shape its own tests use, never a real one, hashed outside this code
+  // with `printf %s <key> | shasum -a 256`. Each donor mints 24 bytes of base64url and stores the
+  // SHA-256 hex of the whole key; the second has two kinds of key, and the third shows 10
+  // characters. A change in any of these orphans that donor's stored keys.
+  it.each([
+    {
+      key: `fk_${"v".repeat(32)}`,
+      hash: "734f6607464e9be9914c24beaa41efae5ea0228a353c326ee5f324f4d56a4d22",
+      display: "fk_vvvvvvvvv",
+    },
+    {
+      key: "ab_checkonlytoken000000000000000000",
+      hash: "218bc67a689c312efdbf7ed473dbcbaea3f6f05733dc9ab7293554f44921795e",
+      display: "ab_checkonly",
+    },
+    {
+      key: "abk_checkonlytoken000000000000000000",
+      hash: "0b7980e8df22309d020aba0cb8048d3aa231a4dfa376c81f1035651f9cd73227",
+      display: "abk_checkonl",
+    },
+    {
+      key: "sg_AbCdEfGhIjKlMnOpQrStUvWxYz-_0123",
+      hash: "7b9cd82112b4107ca785b9c019c87dcdc62ff6e0995847d8497f85a5498e5ee4",
+      display: "sg_AbCdEfG",
+      displayLength: 10,
+    },
+  ])("keeps the bytes $display… was stored with", ({ key, hash, display, displayLength }) => {
+    const codec = createApiKeyCodec({
+      prefix: key.slice(0, key.indexOf("_") + 1),
+      encoding: "base64url",
+      displayLength,
+    });
+    expect(codec.isWellFormedApiKey(key)).toBe(true);
+    expect(codec.looksLikeApiKey(key)).toBe(true);
+    expect(codec.hashApiKey(key)).toBe(hash);
+    expect(codec.displayPrefix(key)).toBe(display);
+  });
+
+  it.each([
+    ["base64's +", `ac_${"a".repeat(31)}+`],
+    ["base64's /", `ac_${"a".repeat(31)}/`],
+    ["base64's padding", `ac_${"a".repeat(31)}=`],
+    ["31 characters", `ac_${"a".repeat(31)}`],
+    ["33 characters", `ac_${"a".repeat(33)}`],
+    ["a trailing newline", `ac_${"a".repeat(32)}\n`],
+    ["a session token", "eyJhbGciOiJIUzI1NiJ9.e30.sig"],
+  ])("refuses %s before any lookup", (_, token) => {
+    expect(b64.isWellFormedApiKey(token)).toBe(false);
+  });
+
+  it("does not take a key of the other encoding", () => {
+    // Capitals and `_` are base64url only, so the hex codec refuses them; a hex key is also valid
+    // base64url, so the reverse is not a test of anything.
+    expect(isWellFormedApiKey("ac_AbCdEfGhIjKlMnOpQrStUvWxYz-_0123")).toBe(false);
+  });
+
+  it.each([0, 3, 20, 11.5, Number.NaN])("refuses a display length of %s", (displayLength) => {
+    // With "ac_" the range is 4 to 19: past the prefix, and at most half the secret.
+    expect(() => createApiKeyCodec({ prefix: "ac_", displayLength })).toThrow(/from 4 to 19/);
+  });
+});

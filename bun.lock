@@ -71,7 +71,7 @@
     },
     "react": {
       "name": "@gusnips/react",
-      "version": "0.9.30",
+      "version": "0.9.31",
       "dependencies": {
         "@gusnips/http": "workspace:*",
         "clsx": "^2.1.1",
@@ -193,7 +193,7 @@
     },
     "vite": {
       "name": "@gusnips/vite",
-      "version": "0.8.41",
+      "version": "0.8.42",
       "dependencies": {
         "@gusnips/react": "workspace:*",
       },

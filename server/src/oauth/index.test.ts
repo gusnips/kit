@@ -155,8 +155,12 @@ function flows(name: string, setup: () => Promise<{ store: () => OAuthStore }>) 
       return answer.body as { client_id: string; client_secret?: string };
     }
 
-    async function approvedCode(oauth: ReturnType<typeof make>, clientId: string) {
-      const approved = await oauth.approve(authorizeQuery(clientId), "user-1");
+    async function approvedCode(
+      oauth: ReturnType<typeof make>,
+      clientId: string,
+      overrides: Record<string, string> = {},
+    ) {
+      const approved = await oauth.approve(authorizeQuery(clientId, overrides), "user-1");
       if (!approved.ok) throw new Error(approved.message);
       return new URL(approved.redirectTo).searchParams.get("code") ?? "";
     }
@@ -471,6 +475,110 @@ function flows(name: string, setup: () => Promise<{ store: () => OAuthStore }>) 
             reason: "unknown-client",
           });
         }
+      });
+
+      it("signs ChatGPT in as a public client, from the document it serves", async () => {
+        // Read from https://chatgpt.com/oauth/client.json on 2026-10-19. It prefers
+        // `private_key_jwt` and also lists `none`, and the kit refused it for the preference.
+        const chatgpt = "https://chatgpt.com/oauth/client.json";
+        const back = "https://chatgpt.com/connector_platform_oauth_redirect";
+        documents.set(
+          chatgpt,
+          doc({
+            client_id: chatgpt,
+            client_uri: "https://chatgpt.com/",
+            redirect_uris: [back],
+            token_endpoint_auth_method: "private_key_jwt",
+            token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+            grant_types: ["authorization_code", "refresh_token"],
+            response_types: ["code"],
+            client_name: "ChatGPT",
+            logo_uri: "https://persistent.oaistatic.com/sonic/misc/openai-logo.png",
+            token_endpoint_auth_signing_alg: "RS256",
+            jwks_uri: "https://chatgpt.com/oauth/jwks.json",
+          }),
+        );
+        const oauth = make();
+        const query = authorizeQuery(chatgpt, { redirect_uri: back });
+        expect(await oauth.describe(query)).toMatchObject({
+          ok: true,
+          clientName: "ChatGPT",
+          redirectHost: "chatgpt.com",
+          keyName: "ChatGPT (chatgpt.com)",
+        });
+        const codeOf = () => approvedCode(oauth, chatgpt, { redirect_uri: back });
+        const plain = exchange(await codeOf(), chatgpt, { redirect_uri: back });
+        expect(await oauth.token(plain, null)).toEqual({
+          status: 200,
+          body: { access_token: "ak_1", token_type: "Bearer" },
+        });
+        // An assertion nobody verifies is ignored, neither trusted nor refused: PKCE decides. It
+        // names the client the way RFC 7523 §3 says, and its signature is junk.
+        const part = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+        const claims = { iss: chatgpt, sub: chatgpt, aud: `${ISSUER}/oauth/token`, jti: "j1" };
+        const assertion = {
+          client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+          client_assertion: `${part({ alg: "RS256" })}.${part(claims)}.c2ln`,
+        };
+        const signed = exchange(await codeOf(), chatgpt, { redirect_uri: back, ...assertion });
+        expect(await oauth.token(signed, null)).toMatchObject({ status: 200 });
+        const wrong = exchange(await codeOf(), chatgpt, {
+          redirect_uri: back,
+          code_verifier: "x".repeat(43),
+          ...assertion,
+        });
+        expect((await oauth.token(wrong, null)).body.error).toBe("invalid_grant");
+        const { client_id: _, ...anonymous } = exchange(await codeOf(), chatgpt, {
+          redirect_uri: back,
+          ...assertion,
+        });
+        expect(await oauth.token(anonymous, null)).toMatchObject({
+          status: 401,
+          body: { error: "invalid_client" },
+        });
+        expect(minted.map((grant) => grant.clientName)).toEqual(["ChatGPT", "ChatGPT"]);
+        expect(fetched).toEqual([chatgpt]);
+      });
+
+      it("refuses a document that offers no method we share, or contradicts itself", async () => {
+        const methods: Array<Record<string, unknown>> = [
+          { token_endpoint_auth_method: "private_key_jwt" },
+          {
+            token_endpoint_auth_method: "private_key_jwt",
+            token_endpoint_auth_methods_supported: ["private_key_jwt"],
+          },
+          { token_endpoint_auth_method: "client_secret_post" },
+          { token_endpoint_auth_methods_supported: ["client_secret_basic"] },
+          // The list beats the single method, which must be on it.
+          {
+            token_endpoint_auth_method: "none",
+            token_endpoint_auth_methods_supported: ["private_key_jwt"],
+          },
+          {
+            token_endpoint_auth_method: "private_key_jwt",
+            token_endpoint_auth_methods_supported: ["none"],
+          },
+          { token_endpoint_auth_methods_supported: "none" },
+          { token_endpoint_auth_methods_supported: [] },
+        ];
+        const oauth = make();
+        for (const [i, fields] of methods.entries()) {
+          const id = `https://agent.example/m${i}.json`;
+          documents.set(id, doc({ client_id: id, redirect_uris: [CALLBACK], ...fields }));
+          expect(await oauth.describe(authorizeQuery(id)), JSON.stringify(fields)).toMatchObject({
+            ok: false,
+            reason: "unknown-client",
+          });
+        }
+        documents.set(
+          ID,
+          doc({
+            client_id: ID,
+            redirect_uris: [CALLBACK],
+            token_endpoint_auth_methods_supported: ["none"],
+          }),
+        );
+        expect(await oauth.describe(authorizeQuery(ID))).toMatchObject({ ok: true });
       });
 
       it("never fetches on the token endpoint, which anyone may call", async () => {

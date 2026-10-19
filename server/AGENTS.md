@@ -759,6 +759,22 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     CLI and send a stranger the link. The guard is the page saying to go on only if you started
     the sign-in yourself (RFC 8628 §5.4), and the README says so.
 
+    **A document signs in with the method we share, not the one it prefers.** Through 0.13.0 a
+    document whose `token_endpoint_auth_method` was not `none` was refused. ChatGPT's (read
+    2026-10-19) prefers `private_key_jwt` and also lists `none` in
+    `token_endpoint_auth_methods_supported`, so every adopter's consent page told ChatGPT it was
+    an unknown app. MCP's SEP-3149 (draft, co-written by OpenAI) is the rule ChatGPT follows: the
+    client uses a method from the intersection of its list and ours, and a server must not refuse
+    a client only because its preferred method is not shared. Ours is `none`, so that is what a
+    document's list must hold; the list beats the single method, the single method must be on the
+    list, and a document with neither means `none`. CIMD draft -02 §8.2 says a server MUST require
+    `private_key_jwt` from a document that declares it, and verifying that would mean fetching the
+    document and its `jwks_uri` on the token route, which anyone may call: the fetch this
+    invariant keeps off public routes. So the kit follows the SEP. A `client_assertion` sent
+    anyway is ignored: unverified, it neither signs the client in nor fails the exchange, and a
+    request with no `client_id` beside it is an unknown client, never one named by the
+    assertion's `sub`. Six planted defects, each caught by a named test, with a green control.
+
 50. **An API key keeps the bytes its donors minted, and its shape is checked with the literal
     prefix.** Nine backends mint API keys. Five mint the same one on `node:crypto`, with only the
     prefix changed: 16 random bytes as 32 lowercase hex, SHA-256 of the whole key, 12 characters

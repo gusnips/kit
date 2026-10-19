@@ -1521,7 +1521,11 @@ CREATE INDEX oauth_grants_expires_at_idx ON app.oauth_grants (expires_at);
 - **A client id comes three ways.** An https URL is a client metadata document: fetched, checked
   and cached for five minutes, which the MCP spec asks for. It is fetched only by `describe` and
   `approve`, behind your sign-in, and never by the public routes, so nobody can make your server
-  fetch a URL without signing in. Anything else is a registration (`POST /oauth/register`) that
+  fetch a URL without signing in. A document holds no secret and the kit checks no signed
+  assertion, so a document signs in when `none` is one of the methods it lists in
+  `token_endpoint_auth_methods_supported`, or, with no list, when its `token_endpoint_auth_method`
+  is `none` or missing. ChatGPT's prefers `private_key_jwt` and lists `none` too, so it signs in
+  with `none` and PKCE. Anything else is a registration (`POST /oauth/register`) that
   stores nothing: the id is our signature over the client's name and redirects, so registering
   costs no row. The third is a name in `deviceClients`.
 - **Only `deviceClients` may start a device sign-in.** A registered client picks its own name, so

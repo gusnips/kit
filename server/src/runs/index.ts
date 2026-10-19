@@ -20,6 +20,9 @@
  *   same statement, or a tail waits for a frame that never comes.
  * - **Appends never hold up the work, and never reorder.** `emit` returns at once; the appends run
  *   behind it one at a time, and a finish waits for them.
+ * - **A deploy must not wait for a run to finish.** One donor's deploys waited up to 35 minutes
+ *   for its runs to end. Here `drain` gives them a few seconds, then puts a resumable run back in
+ *   the queue, where the next process picks it up.
  * - **A late writer must not touch the run that replaced it** (invariant 57). A worker that was
  *   paused past its lease still holds its handler, and every write it tries afterwards is refused.
  *
@@ -133,19 +136,22 @@ export interface Run {
    * worker took the run over), `cancelled` or `shutdown`. Pass it to every provider call.
    */
   readonly signal: AbortSignal;
-  /** Keeps `state` as the checkpoint a resumed run starts from. Throws once the run is lost. */
+  /**
+   * Keeps `state` as the checkpoint a resumed run starts from. Throws once this worker no longer
+   * holds the run.
+   */
   save(state: unknown): Promise<void>;
   /**
    * Adds `usd` to what this run has spent, for the tree's `budgetUsd`. The total outlives a
-   * restart. Throws once the run is lost.
+   * restart. Throws once this worker no longer holds the run.
    */
   spend(usd: number): Promise<void>;
   /**
    * Runs `fn` as a child, kept under `key` among this run's children. A child that already
    * finished, in this attempt or one before a restart, does not run again: `child` returns what it
    * stored. A child its dead worker left unfinished goes by its own `restart`. Children run in
-   * this process, under this run's lease. Throws once the run is lost, and when this run already
-   * has a child running under `key`.
+   * this process, under this run's lease. Throws once this worker no longer holds the run, and
+   * when this run already has a child running under `key`.
    */
   child<T>(key: string, spec: ChildSpec, fn: (run: Run) => Promise<T>): Promise<ChildResult<T>>;
   /**
@@ -198,6 +204,9 @@ const LIMIT_NAMES = ["maxParallel", "maxChildren", "maxDepth", "budgetUsd"] as c
  *  is the upgrade, at the cost of a connection held per tail. */
 const TAIL_POLL_MS = 1_000;
 const TAIL_PAGE = 100;
+/** ponytail: a sweep nudges at most this many runs, and the next sweep takes the rest. */
+const SWEEP_LIMIT = 500;
+const PRUNE_PAGE = 1_000;
 
 /** What a handler's `run` is made from. */
 interface RunRow {
@@ -226,6 +235,10 @@ interface Tree {
   children: number;
   spent: number;
   slots?: Slots;
+  /** The handler returned, and the run is being written. A drain lets it finish. */
+  finishing: boolean;
+  /** How a drain left the run, once it stopped it. */
+  drained?: Promise<DriveOutcome>;
 }
 
 /** One run in a tree, with its own event sequence. */
@@ -345,7 +358,7 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
   const takeChildSql = `UPDATE ${runs} c SET status = 'running', lease_token = $3,
       crashes = c.crashes + (c.status = 'running')::int, updated_at = now()
     WHERE c.id = $1 AND c.root_id = $2 AND c.status IN ('queued', 'running')
-      AND (c.restart <> 'fail' OR c.status = 'queued') AND ${rootHeld}
+      AND c.restart <> 'fail' AND ${rootHeld}
     RETURNING c.crashes, CASE WHEN c.restart = 'resume' THEN c.checkpoint END AS checkpoint`;
   const endChildSql = `WITH done AS (
       UPDATE ${runs} c SET status = $4, result = $5::json, error = $6::json, lease_token = NULL,
@@ -404,16 +417,57 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
       now()), updated_at = now()
     WHERE id = $1 AND parent_id IS NULL AND status = 'running'`;
 
+  // A drain ends a `fail` run (or a cancelled one) as its worker's death would, and puts any other
+  // back in the queue, children too, for the next process. That is not a crash, so none is counted.
+  const interruptSql = closeTree(`UPDATE ${runs} SET
+      status = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'failed' END,
+      error = CASE WHEN cancel_requested_at IS NOT NULL THEN NULL
+        ELSE '{"code":"interrupted"}'::json END,
+      lease_token = NULL, lease_until = NULL, finished_at = now(), updated_at = now()
+    WHERE id = $1 AND lease_token = $2 AND status = 'running'
+      AND (restart = 'fail' OR cancel_requested_at IS NOT NULL)`);
+  const requeueSql = `WITH root AS (
+      UPDATE ${runs} SET status = 'queued', lease_token = NULL, lease_until = NULL,
+        updated_at = now()
+      WHERE id = $1 AND lease_token = $2 AND status = 'running' RETURNING id),
+    kids AS (
+      UPDATE ${runs} c SET status = CASE WHEN c.restart = 'fail' THEN 'failed' ELSE 'queued' END,
+        error = CASE WHEN c.restart = 'fail' THEN '{"code":"interrupted"}'::json END,
+        finished_at = CASE WHEN c.restart = 'fail' THEN now() END,
+        lease_token = NULL, updated_at = now()
+      FROM root WHERE c.root_id = root.id AND c.id <> root.id AND c.status = 'running'
+      RETURNING c.id, c.status, c.error),
+    ended AS (INSERT INTO ${events} (run_id, seq, type, data)
+      SELECT id, (SELECT coalesce(max(seq), 0) + 1 FROM ${events} e WHERE e.run_id = kids.id),
+        'end', json_build_object('status', status, 'error', error)
+      FROM kids WHERE status = 'failed')
+    SELECT id FROM root`;
+
+  // Queued runs nobody has looked at for $1 seconds, and dead workers' runs that can go on. Each
+  // one's clock starts again, so the next sweep leaves it alone for as long.
+  const nudgeSql = `UPDATE ${runs} SET updated_at = now() WHERE id IN (
+      SELECT id FROM ${runs}
+      WHERE parent_id IS NULL AND cancel_requested_at IS NULL
+        AND ((status = 'queued' AND updated_at <= now() - make_interval(secs => $1))
+          OR (status = 'running' AND lease_until < now() AND restart <> 'fail'
+            AND crashes < max_crashes))
+      ORDER BY updated_at LIMIT $2 FOR UPDATE SKIP LOCKED)
+    RETURNING id`;
+  // Children and events go with their root, through the foreign keys.
+  const pruneSql = `DELETE FROM ${runs} WHERE id IN (
+      SELECT id FROM ${runs}
+      WHERE parent_id IS NULL AND finished_at < now() - make_interval(days => $1)
+      ORDER BY finished_at LIMIT $2)`;
+
   const stateSql = `SELECT status IN ('succeeded', 'failed', 'cancelled') AS finished
     FROM ${runs} WHERE id = $1`;
   const readSql = `SELECT seq, type, data, at FROM ${events}
     WHERE run_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`;
 
-  /** Aborts the tree with `lost`, and returns the error a refused write throws. */
-  function lose(tree: Tree): RunStopped {
-    const lost = new RunStopped("lost");
-    if (!tree.controller.signal.aborted) tree.controller.abort(lost);
-    return lost;
+  /** Aborts the tree with `lost`, unless it stopped already, and returns why it stopped. */
+  function lose(tree: Tree): unknown {
+    if (!tree.controller.signal.aborted) tree.controller.abort(new RunStopped("lost"));
+    return tree.controller.signal.reason;
   }
 
   /** Extends the lease every leaseSecs/3, and reads the cancel flag while it is there. */
@@ -455,7 +509,7 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
     value: unknown,
   ): Promise<void> {
     const { signal } = tree.controller;
-    if (stopCode(signal) === "lost") throw signal.reason;
+    if (released(signal)) throw signal.reason;
     const { rowCount } = await pool.query(node.depth === 0 ? sql.root : sql.child, [
       node.id,
       tree.rootId,
@@ -494,7 +548,7 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         const seq = ++node.seq;
         node.appends = node.appends
           .then(async () => {
-            if (stopCode(signal) === "lost") return;
+            if (released(signal)) return;
             const appended = await pool.query(appendSql, [
               node.id,
               tree.rootId,
@@ -536,6 +590,7 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
   }
 
   async function finish(tree: Tree, kind: string, outcome: Attempt): Promise<DriveOutcome> {
+    if (tree.drained) return tree.drained;
     if (stopCode(tree.controller.signal) === "lost") return "lost";
     const { status, result, error } = verdict(tree.controller.signal, tree.rootId, kind, outcome);
     const { rows } = await pool.query<{ status: "succeeded" | "failed" | "cancelled" }>(finishSql, [
@@ -611,7 +666,8 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         attempt(() => fn(runOf(tree, node, row))),
       );
       await node.appends;
-      if (stopCode(signal) === "lost") throw signal.reason;
+      // A drain writes the whole tree itself.
+      if (released(signal)) throw signal.reason;
       return await endChild<T>(tree, node, verdict(signal, node.id, spec.kind, outcome));
     } finally {
       parent.keys.delete(key);
@@ -637,6 +693,50 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
     if (!ended) throw lose(tree);
     if (status === "succeeded") return { ok: true, value: ended.result };
     return { ok: false, error: error ?? { code: "cancelled" } };
+  }
+
+  /** What a drain does to a run it stops: end it, or put it back in the queue. */
+  async function shutDown(tree: Tree): Promise<DriveOutcome> {
+    const values = [tree.rootId, tree.token];
+    try {
+      const ended = (await pool.query<{ status: "failed" | "cancelled" }>(interruptSql, values))
+        .rows[0];
+      if (ended) return ended.status;
+      return (await pool.query(requeueSql, values)).rows.length > 0 ? "requeued" : "lost";
+    } catch (cause) {
+      // Its lease runs out, and the next worker does what its policy says.
+      onError(new Error(`Run ${tree.rootId} could not be put back for the next worker`, { cause }));
+      return "lost";
+    }
+  }
+
+  let draining = false;
+  /** Each tree this process holds, with the `drive` call running it. */
+  const held = new Map<Tree, Promise<DriveOutcome>>();
+
+  async function driveTree(
+    tree: Tree,
+    claimed: ClaimedRow,
+    handlers: Readonly<Record<string, RunHandler>>,
+    seq: number | undefined,
+  ): Promise<DriveOutcome> {
+    const root = nodeOf(tree.rootId, 0, seq);
+    const release = holdLease(tree);
+    try {
+      const handler = Object.hasOwn(handlers, claimed.kind) ? handlers[claimed.kind] : undefined;
+      const outcome = await attempt(() => {
+        if (!handler)
+          throw new Error(
+            `No handler for kind "${claimed.kind}". Add it to the handlers passed to drive.`,
+          );
+        return handler(runOf(tree, root, claimed));
+      });
+      tree.finishing = true;
+      await root.appends;
+      return await finish(tree, claimed.kind, outcome);
+    } finally {
+      release();
+    }
   }
 
   return {
@@ -686,6 +786,7 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
       runId: string,
       handlers: Readonly<Record<string, RunHandler>>,
     ): Promise<DriveOutcome> {
+      if (draining) return "skipped";
       const token = crypto.randomUUID();
       const claimed = (await pool.query<ClaimedRow>(claimSql, [runId, token, leaseSecs])).rows[0];
       if (!claimed) {
@@ -709,30 +810,90 @@ export function createRuns(pool: Pick<Pool, "query">, options: RunsOptions) {
         ...(limits.maxParallel !== undefined && {
           slots: { free: limits.maxParallel, queue: [] },
         }),
+        finishing: false,
       };
-      const root = nodeOf(runId, 0, rows[0]?.seq);
-      const release = holdLease(tree);
+      const driving = driveTree(tree, claimed, handlers, rows[0]?.seq);
+      held.set(tree, driving);
       try {
-        const handler = Object.hasOwn(handlers, claimed.kind) ? handlers[claimed.kind] : undefined;
-        const outcome = await attempt(() => {
-          if (!handler)
-            throw new Error(
-              `No handler for kind "${claimed.kind}". Add it to the handlers passed to drive.`,
-            );
-          return handler(runOf(tree, root, claimed));
-        });
-        await root.appends;
-        return await finish(tree, claimed.kind, outcome);
+        return await driving;
       } finally {
-        release();
+        held.delete(tree);
+      }
+    },
+
+    /**
+     * For a shutdown, before the queue worker closes. Stops claiming runs (`drive` returns
+     * `"skipped"`), and gives the runs in flight `ms` to finish. Then it stops the rest: their
+     * `run.signal` aborts with code `shutdown`, a `fail` run ends `interrupted`, and any other run
+     * goes back in the queue, children too, for `sweep` to send out again. A handler that ignores
+     * its signal does not hold the drain up: what it writes afterwards is refused.
+     */
+    async drain(ms: number): Promise<void> {
+      draining = true;
+      const waited = new AbortController();
+      await Promise.race([Promise.allSettled(held.values()), sleep(ms, waited.signal)]);
+      waited.abort();
+      await Promise.allSettled(
+        [...held].map(([tree, driving]) => {
+          if (tree.finishing) return driving;
+          if (stopCode(tree.controller.signal) === "lost") return undefined;
+          tree.controller.abort(new RunStopped("shutdown"));
+          tree.drained = shutDown(tree);
+          return tree.drained;
+        }),
+      );
+    },
+
+    /**
+     * Sends out again what no worker is on: queued runs nobody has looked at for `olderThanSecs`
+     * (default 120), and runs whose worker died and whose policy lets them go on. A dead worker's
+     * run that its policy ends, it ends. Run it once on boot with `olderThanSecs: 0`, then every
+     * minute. `nudge` adds the run's job again; one that throws goes to `onError`.
+     */
+    async sweep({
+      nudge,
+      olderThanSecs = 120,
+    }: {
+      /** Adds the run's job again. Awaited, and what it returns is ignored. */
+      nudge: (runId: string) => unknown;
+      olderThanSecs?: number;
+    }): Promise<{ nudged: number; ended: number }> {
+      if (!(Number.isFinite(olderThanSecs) && olderThanSecs >= 0))
+        throw new TypeError(`olderThanSecs is a number of 0 or more, not ${olderThanSecs}`);
+      const ended = (await pool.query(expireSql, [null, SWEEP_LIMIT])).rows.length;
+      const { rows } = await pool.query<{ id: string }>(nudgeSql, [olderThanSecs, SWEEP_LIMIT]);
+      let nudged = 0;
+      for (const { id } of rows) {
+        try {
+          await nudge(id);
+          nudged++;
+        } catch (cause) {
+          onError(new Error(`Run ${id} could not be sent out again`, { cause }));
+        }
+      }
+      return { nudged, ended };
+    },
+
+    /**
+     * Deletes runs that finished more than `days` ago, with their children and events. Returns
+     * how many runs it deleted, not counting children.
+     */
+    async prune(days: number): Promise<number> {
+      if (!(Number.isInteger(days) && days >= 0))
+        throw new TypeError(`days is a whole number of 0 or more, not ${days}`);
+      let pruned = 0;
+      for (;;) {
+        const deleted = (await pool.query(pruneSql, [days, PRUNE_PAGE])).rowCount ?? 0;
+        pruned += deleted;
+        if (deleted < PRUNE_PAGE) return pruned;
       }
     },
 
     /**
      * Cancels a run and everything under it. A queued run ends at once. A running one is flagged,
      * and its worker aborts `run.signal` with code `cancelled` at its next heartbeat, within
-     * `leaseSecs / 3` (10 seconds by default). A run whose worker died ends here. False when the run
-     * had already finished, or does not exist.
+     * `leaseSecs / 3` (10 seconds by default). A run whose worker died ends here. False when the
+     * run had already finished, or does not exist.
      */
     async cancel(runId: string): Promise<boolean> {
       if ((await pool.query(cancelQueuedSql, [runId])).rows.length > 0) return true;
@@ -860,6 +1021,12 @@ function give(slots: Slots): void {
   const next = slots.queue.shift();
   if (next) next();
   else slots.free++;
+}
+
+/** True once this worker gave the run up: it lost the lease, or a drain handed the run on. */
+function released(signal: AbortSignal): boolean {
+  const stop = stopCode(signal);
+  return stop === "lost" || stop === "shutdown";
 }
 
 function stopCode(signal: AbortSignal): StopCode | undefined {

@@ -1113,6 +1113,58 @@ The `short` policy keeps one waiting job per `singletonKey`, so a second send fo
 dropped. Without `singletonKey` it would keep one waiting job for the whole queue. A duplicate
 would be harmless anyway, because only one `drive` can claim a run; the policy only saves work.
 
+**Sweep on boot, then every minute.** A run can be left with no job: its job failed for good, a
+drain put it back, or Redis lost it. `runs.sweep` finds those and calls your `nudge` to add the
+job again. It also ends a dead worker's run that its policy ends, without waiting for a job.
+
+```ts
+import { removeLeftoverJob } from "@gusnips/server/bullmq";
+
+const nudge = async (runId: string) => {
+  await removeLeftoverJob(await runQueue.getJob(runId));
+  await runQueue.add("run", { runId }, { jobId: runId });
+};
+await runs.sweep({ nudge, olderThanSecs: 0 });
+setInterval(() => runs.sweep({ nudge }).catch(onError), 60_000);
+```
+
+On boot it sends out every queued run. After that, only those queued for 2 minutes
+(`olderThanSecs`, default 120), so a job that was just added is not sent twice. A run whose
+worker died is sent out at every sweep until a worker takes it. On pg-boss, `nudge` is
+`(runId) => boss.send("runs", { runId }, { singletonKey: runId, retryLimit: 0 })`, and the sweep
+is the only thing that brings a dead worker's run back: with `retryLimit: 0`, pg-boss fails the
+job when it expires (15 minutes by default) and never runs it again.
+
+**On a deploy, drain before the worker closes:**
+
+```ts
+drainWith(
+  createShutdown(
+    [
+      bunServerStep(server, { graceMs: 5_000 }),
+      { name: "runs", run: () => runs.drain(10_000) },
+      { name: "worker", run: () => worker.close(redis.status !== "ready") },
+      { name: "redis", run: () => quitRedis(redis) },
+      { name: "postgres", run: () => pool.end() },
+    ],
+    { hardExitMs: 25_000, logger },
+  ),
+);
+```
+
+`runs.drain(10_000)` stops claiming runs and gives the ones in flight 10 seconds to finish. Then
+it stops the rest: `run.signal` aborts with code `shutdown`, a `resume` or `restart` run goes back
+in the queue with its children, and a `fail` run ends `interrupted`. A drain is not a crash, so
+`crashes` does not go up. The next process's boot sweep sends the queued runs out again.
+
+The order matters. `worker.close()` waits for every job in flight, and a run can take minutes.
+After the drain, every handler that passes `run.signal` on has already returned, so it closes at
+once. Postgres closes last, because the drain
+writes to it. `hardExitMs` must be longer than all the steps together.
+
+**Prune once a day.** `runs.prune(30)` deletes the runs that finished more than 30 days ago, with
+their children and events.
+
 ## A rate limit
 
 ```ts

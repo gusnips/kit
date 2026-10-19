@@ -600,6 +600,147 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     },
   );
 
+  it("sends out stale queued runs and dead runs that can go on, and ends the rest", async () => {
+    const runs = store();
+    const stale = (await runs.create(SPEC)).id;
+    const fresh = (await runs.create(SPEC)).id;
+    const resumable = (await runs.create({ ...SPEC, restart: "resume" })).id;
+    const failing = (await runs.create(SPEC)).id;
+    await pool.query(
+      "UPDATE app.runs SET updated_at = now() - interval '3 minutes' WHERE id = $1",
+      [stale],
+    );
+    await pool.query(
+      `UPDATE app.runs SET status = 'running', lease_token = gen_random_uuid(),
+         lease_until = now() - interval '1 second', started_at = now() WHERE id = ANY($1)`,
+      [[resumable, failing]],
+    );
+
+    const nudged: string[] = [];
+    const nudge = (id: string) => {
+      nudged.push(id);
+      if (id === resumable) throw new Error("Redis is down");
+    };
+    expect(await runs.sweep({ nudge })).toEqual({ nudged: 1, ended: 1 });
+    expect(nudged.sort()).toEqual([stale, resumable].sort());
+    expect(errors).toHaveLength(1);
+    expect(await rowOf(failing)).toMatchObject({
+      status: "failed",
+      error: { code: "interrupted" },
+    });
+    expect(await eventsOf(failing)).toEqual([
+      { seq: 1, type: "end", data: { status: "failed", error: { code: "interrupted" } } },
+    ]);
+
+    // Its clock started again; the dead run is still dead. On boot, everything queued goes out.
+    nudged.length = 0;
+    await runs.sweep({ nudge });
+    expect(nudged).toEqual([resumable]);
+    nudged.length = 0;
+    await runs.sweep({ nudge, olderThanSecs: 0 });
+    expect(nudged.sort()).toEqual([stale, fresh, resumable].sort());
+  });
+
+  it("drains: waits, then puts a resumable tree back in the queue and ends a fail run", async () => {
+    const runs = store();
+    const quick = (await runs.create(SPEC)).id;
+    const resumable = (await runs.create({ ...SPEC, restart: "resume" })).id;
+    const failing = (await runs.create(SPEC)).id;
+    const started = [gate(), gate(), gate()];
+    const stopped: unknown[] = [];
+    const ignoring = gate();
+
+    const done = runs.drive(quick, {
+      report: async () => {
+        started[0]?.open();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return "made it";
+      },
+    });
+    const requeued = runs.drive(resumable, {
+      report: async (run) => {
+        await run.save({ step: 1 });
+        return run.child("search", { kind: "search", input: null }, (child) => {
+          started[1]?.open();
+          return new Promise((_, reject) =>
+            child.signal.addEventListener("abort", () => {
+              stopped.push(child.signal.reason);
+              reject(child.signal.reason);
+            }),
+          );
+        });
+      },
+    });
+    // This handler ignores its signal, and the drain does not wait for it.
+    const failed = runs.drive(failing, {
+      report: async (run) => {
+        started[2]?.open();
+        await ignoring.opened;
+        await run.save({ late: true }).catch((error: unknown) => stopped.push(error));
+      },
+    });
+    await Promise.all(started.map(({ opened }) => opened));
+
+    await runs.drain(500);
+    expect(await done).toBe("succeeded");
+    expect(await requeued).toBe("requeued");
+    expect(stopped).toMatchObject([{ code: "shutdown" }]);
+    expect(await rowOf(resumable)).toMatchObject({
+      status: "queued",
+      crashes: 0,
+      checkpoint: { step: 1 },
+    });
+    expect(await rowOf(await childOf(resumable, "search"))).toMatchObject({ status: "queued" });
+    expect(await rowOf(failing)).toMatchObject({
+      status: "failed",
+      error: { code: "interrupted" },
+    });
+    expect(await runs.drive((await runs.create(SPEC)).id, {})).toBe("skipped");
+
+    ignoring.open();
+    expect(await failed).toBe("failed");
+    expect(stopped.at(-1)).toMatchObject({ code: "shutdown" });
+
+    // The next process: the sweep sends it out, and it goes on with its child, no crash counted.
+    const next = store();
+    const nudged: string[] = [];
+    await next.sweep({ nudge: (id) => void nudged.push(id), olderThanSecs: 0 });
+    expect(nudged).toContain(resumable);
+    let seen: Pick<Run, "resumed" | "crashes" | "checkpoint"> | undefined;
+    const outcome = await next.drive(resumable, {
+      report: (run) =>
+        run.child("search", { kind: "search", input: null }, async (child) => {
+          seen = { resumed: child.resumed, crashes: child.crashes, checkpoint: run.checkpoint };
+          return "found";
+        }),
+    });
+    expect(outcome).toBe("succeeded");
+    expect(seen).toEqual({ resumed: true, crashes: 0, checkpoint: { step: 1 } });
+  });
+
+  it("prunes finished runs older than the cutoff, with their children and events", async () => {
+    const runs = store();
+    const old = (await runs.create(SPEC)).id;
+    await runs.drive(old, {
+      report: (run) => run.child("a", { kind: "search", input: null }, async () => "x"),
+    });
+    const recent = (await runs.create(SPEC)).id;
+    await runs.drive(recent, { report: async () => "y" });
+    const open = (await runs.create(SPEC)).id;
+    await pool.query(
+      "UPDATE app.runs SET finished_at = now() - interval '8 days' WHERE root_id = $1",
+      [old],
+    );
+
+    expect(await runs.prune(7)).toBe(1);
+    const { rows } = await pool.query<{ id: string }>(
+      "SELECT id FROM app.runs ORDER BY created_at",
+    );
+    expect(rows.map(({ id }) => id)).toEqual([recent, open]);
+    expect(await eventsOf(old)).toEqual([]);
+    await expect(runs.prune(1.5)).rejects.toThrow("days is a whole number");
+  });
+
   it("creates the run inside the caller's transaction", async () => {
     const runs = store();
     const client = await pool.connect();

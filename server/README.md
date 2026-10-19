@@ -978,8 +978,8 @@ it threw. `onError` gets the thrown error too, with its stack. `drive` itself th
 database fails. So a job delivered twice does no harm: the second `drive` finds the run held or
 finished, and returns `"skipped"`.
 
-**When the worker dies.** A worker holds its run with a lease, renewed every 10 seconds. A lease
-that is not renewed runs out after 30. The next `drive` then takes the run over, counts a crash,
+**When the worker dies.** A worker holds its run with a lease, renewed every 5 seconds. A lease
+that is not renewed runs out after 15. The next `drive` then takes the run over, counts a crash,
 and does what the run's `restart` says:
 
 - `fail`, the default: the run ends `failed` with code `interrupted`.
@@ -993,8 +993,10 @@ its worker every time stops being retried.
 
 **A worker that comes back late changes nothing.** A process paused past its lease (a long garbage
 collection, a frozen VM) still has its handler running. Every `run.save` it makes throws, its
-events are dropped, and `run.signal` aborts with a `RunStopped` whose `code` is `"lost"`. Pass
-`run.signal` to every provider call, so the late handler stops paying for tokens.
+events are dropped, and `run.signal` aborts with a `RunStopped` whose `code` is `"lost"`. A worker
+whose renewals go unanswered for 15 seconds, on a stuck database or a dropped network, aborts its
+`run.signal` the same way without waiting to find out. Pass `run.signal` to every provider call,
+so the late handler stops paying for tokens.
 
 **Events.** `run.emit(type, data)` returns at once, and the appends run in order behind the work.
 `runs.tail(id, afterSeq, signal)` yields every event after `afterSeq`, then each new one, until the
@@ -1057,11 +1059,14 @@ const notes = found.flatMap((result) => (result.ok ? [result.value] : []));
   lends them its place, so a deep tree never waits on itself.
 - `run.spend(usd)` adds to the tree's spend, and the total is read back at every claim. A resumed
   run counts what it spent before, so it cannot buy past `budgetUsd` a second time.
+- Use a child's `run` only inside its function. After the function returns, `save`, `spend` and
+  `child` on it throw, and `emit` goes to `onError`. The rest of the tree goes on.
 
-**Cancel.** `runs.cancel(id)` stops a run and every child under it. A queued run ends at once. A
-running one finds out at its worker's next heartbeat, within 10 seconds: `run.signal` aborts with
-code `cancelled`, and the run ends `cancelled` unless it already finished its work. It returns
-false when the run had already finished. Check that the run belongs to the caller first.
+**Cancel.** `runs.cancel(id)` stops a run and every child under it. Given a child's id, it stops
+the whole tree that child is in. A queued run ends at once. A running one finds out at its worker's
+next heartbeat, within 5 seconds: `run.signal` aborts with code `cancelled`, and the run ends
+`cancelled` unless it already finished its work. It returns false when the run had already
+finished. Check that the run belongs to the caller first.
 
 **On BullMQ**, add the job after the transaction that created the run has committed, or a worker
 can take it before the row is there:
@@ -1083,9 +1088,11 @@ const worker = createWorker<{ runId: string }>(
 await runQueue.add("run", { runId: id }, { jobId: id });
 ```
 
-`attempts: 1`, because a retry of `drive` would only find what the first one left. A worker that
-dies is still covered: BullMQ re-runs its job 35 to 69 seconds later, and by then the lease has run
-out, so the re-run takes the run over. The `jobId` makes a second add a no-op while the job exists.
+`attempts: 1`, because a retry of `drive` would only find what the first one left. The `jobId`
+makes a second add a no-op while the job exists. BullMQ re-runs the job of a worker that died, but
+it can do so about 15 seconds after the death, while the run's lease may still hold. That re-run
+finds the run held, returns `"skipped"`, and BullMQ counts the job as done. So the sweep below is
+required on BullMQ too: it is what sends that run out again.
 
 **On pg-boss**, send the job inside the transaction that creates the run, so neither exists
 without the other:
@@ -1113,9 +1120,10 @@ The `short` policy keeps one waiting job per `singletonKey`, so a second send fo
 dropped. Without `singletonKey` it would keep one waiting job for the whole queue. A duplicate
 would be harmless anyway, because only one `drive` can claim a run; the policy only saves work.
 
-**Sweep on boot, then every minute.** A run can be left with no job: its job failed for good, a
-drain put it back, or Redis lost it. `runs.sweep` finds those and calls your `nudge` to add the
-job again. It also ends a dead worker's run that its policy ends, without waiting for a job.
+**Sweep on boot, then every minute, on either queue.** A run can be left with no job: its job
+failed for good, its job came back while the lease still held, a drain put it back, or Redis lost
+it. `runs.sweep` finds those and calls your `nudge` to add the job again. It also ends a dead
+worker's run that its policy ends, without waiting for a job.
 
 ```ts
 import { removeLeftoverJob } from "@gusnips/server/bullmq";
@@ -1154,8 +1162,10 @@ drainWith(
 
 `runs.drain(10_000)` stops claiming runs and gives the ones in flight 10 seconds to finish. Then
 it stops the rest: `run.signal` aborts with code `shutdown`, a `resume` or `restart` run goes back
-in the queue with its children, and a `fail` run ends `interrupted`. A drain is not a crash, so
-`crashes` does not go up. The next process's boot sweep sends the queued runs out again.
+in the queue with its children, and a `fail` run ends `interrupted`. A run whose claim was still
+on its way when the drain began goes back in the queue before its handler starts, whatever its
+`restart`. A drain is not a crash, so `crashes` does not go up. The next process's boot sweep sends
+the queued runs out again.
 
 The order matters. `worker.close()` waits for every job in flight, and a run can take minutes.
 After the drain, every handler that passes `run.signal` on has already returned, so it closes at

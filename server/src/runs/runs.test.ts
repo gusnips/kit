@@ -41,7 +41,7 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     errors = [];
   });
 
-  const store = (options: Partial<RunsOptions> = {}, db: Pick<Pool, "query"> = pool) =>
+  const store = (options: Partial<RunsOptions> = {}, db: Pick<Pool, "query" | "connect"> = pool) =>
     createRuns(db, {
       table: "app.runs",
       events: "app.run_events",
@@ -76,7 +76,7 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
 
   /**
    * A worker that took the run, saved `{ step: 1 }` and three events, and then stopped answering:
-   * its handler waits on `resume`, and its heartbeat (every 10 s) does not come in a test.
+   * its handler waits on `resume`, and its heartbeat (every 5 s) does not come in a test.
    */
   async function stalledWorker(id: string) {
     const started = gate();
@@ -97,6 +97,47 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     await eventually(async () => (await eventsOf(id)).length === 3);
     return { driving, resume, signal: () => run?.signal };
   }
+
+  /**
+   * A pool whose first query matching `match` runs in a transaction of its own, and keeps its
+   * locks until `release()`: a write caught in flight, at the moment a close or a claim must wait.
+   */
+  function holding(match: (text: string) => boolean) {
+    const held = gate();
+    const released = gate();
+    let armed = true;
+    // The cast: pg's `query` has eight overloads, and this stub forwards the one the module calls.
+    const db = {
+      connect: () => pool.connect(),
+      query: async (text: string, values?: unknown[]) => {
+        if (!(armed && match(text))) return pool.query(text, values);
+        armed = false;
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const result = await client.query(text, values);
+          held.open();
+          await released.opened;
+          await client.query("COMMIT");
+          return result;
+        } finally {
+          client.release();
+        }
+      },
+    } as unknown as Pick<Pool, "query" | "connect">;
+    return { db, held: held.opened, release: released.open };
+  }
+  const isAppend = (text: string) => text.startsWith("INSERT INTO app.run_events");
+  const isAddChild = (text: string) =>
+    text.startsWith("INSERT INTO app.runs (id, root_id, parent_id");
+
+  /** True once a statement waits on a row lock: the close or the claim under test is held up. */
+  const blocked = async () =>
+    (
+      await pool.query(
+        "SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()",
+      )
+    ).rows.length > 0;
 
   it("runs a queued run once, and keeps its result and events in order", async () => {
     const runs = store();
@@ -172,6 +213,31 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
       code: "handler",
       message: 'No handler for kind "constructor". Add it to the handlers passed to drive.',
     });
+
+    // A throw that cannot even be turned into a string is still the handler's failure.
+    const { id: odd } = await runs.create(SPEC);
+    expect(await runs.drive(odd, { report: () => Promise.reject(Object.create(null)) })).toBe(
+      "failed",
+    );
+    expect((await rowOf(odd))?.error).toEqual({ code: "handler", message: "[object Object]" });
+  });
+
+  it("rejects a save JSON cannot hold, instead of throwing", async () => {
+    const runs = store();
+    const { id } = await runs.create(SPEC);
+    let how = "";
+    await runs.drive(id, {
+      report: async (run) => {
+        const loop: Record<string, unknown> = {};
+        loop.self = loop;
+        try {
+          await run.save(loop).catch(() => (how = "rejected"));
+        } catch {
+          how = "threw";
+        }
+      },
+    });
+    expect(how).toBe("rejected");
   });
 
   it("does nothing for a finished run, or one that does not exist", async () => {
@@ -186,17 +252,9 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
   });
 
   it("lets a worker past its lease write nothing, and resumes the next at the next seq", async () => {
-    // The plan's case in real time: a 1-second lease, and a heartbeat that stops answering, as
-    // in a process that is paused rather than dead.
-    let paused = false;
-    // The cast: pg's `query` has eight overloads, and this stub forwards the one the module calls.
-    const pausable = {
-      query: (text: string, values?: unknown[]) =>
-        paused && text.includes("RETURNING cancel_requested_at")
-          ? new Promise<never>(() => {})
-          : pool.query(text, values),
-    } as unknown as Pick<Pool, "query">;
-    const a = store({ leaseSecs: 1 }, pausable);
+    // A worker paused past its lease, as in a long garbage collection: its own clock has not run
+    // out yet, so its late writes reach the database, and the database has handed the run on.
+    const a = store();
     const { id } = await a.create({ ...SPEC, restart: "resume" });
     const aStarted = gate();
     const aLate = gate();
@@ -207,7 +265,6 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
         aRun = run;
         for (const n of [1, 2, 3]) run.emit("step", { n });
         await run.save({ step: 1 });
-        paused = true;
         aStarted.open();
         await aLate.opened;
         run.emit("late", {});
@@ -216,12 +273,13 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
       },
     });
     await aStarted.opened;
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await eventually(async () => (await eventsOf(id)).length === 3);
+    await expireLease(id);
 
     const bStarted = gate();
     const bDone = gate();
     let bRun: Run | undefined;
-    const bDriving = store({ leaseSecs: 1 }).drive(id, {
+    const bDriving = store().drive(id, {
       report: async (run) => {
         bRun = run;
         bStarted.open();
@@ -250,7 +308,57 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
       "5 end",
     ]);
     expect(errors).toEqual([]);
-  }, 15_000);
+  });
+
+  it("stops a run itself once a whole lease passes with no heartbeat answered", async () => {
+    // A heartbeat that hangs, on a stuck pool or a dropped network, never answers either way.
+    let hanging = false;
+    // The cast: pg's `query` has eight overloads, and this stub forwards the one the module calls.
+    const hangs = {
+      connect: () => pool.connect(),
+      query: (text: string, values?: unknown[]) =>
+        hanging && text.includes("RETURNING cancel_requested_at")
+          ? new Promise<never>(() => {})
+          : pool.query(text, values),
+    } as unknown as Pick<Pool, "query" | "connect">;
+    const a = store({ leaseSecs: 1 }, hangs);
+    const { id } = await a.create({ ...SPEC, restart: "resume" });
+    const aStopped = gate();
+    let aRun: Run | undefined;
+    const aDriving = a.drive(id, {
+      report: async (run) => {
+        aRun = run;
+        hanging = true;
+        await run.save({ step: 1 });
+        await new Promise((resolve) => run.signal.addEventListener("abort", resolve));
+        aStopped.open();
+        run.emit("late", {});
+        return run.save({ step: 99 });
+      },
+    });
+    await aStopped.opened;
+    expect(aRun?.signal.reason).toMatchObject({ code: "lost" });
+    expect(await aDriving).toBe("lost");
+
+    // Nothing was written for it: the run waits for its lease to run out, as a dead worker's does.
+    expect(await rowOf(id)).toMatchObject({ status: "running", checkpoint: { step: 1 } });
+    await eventually(
+      async () =>
+        (await pool.query("SELECT 1 FROM app.runs WHERE id = $1 AND lease_until < now()", [id]))
+          .rows.length > 0,
+    );
+    let next: Run | undefined;
+    const outcome = await store().drive(id, {
+      report: async (run) => {
+        next = run;
+        return "done";
+      },
+    });
+    expect(outcome).toBe("succeeded");
+    expect(next).toMatchObject({ resumed: true, crashes: 1, checkpoint: { step: 1 } });
+    expect(await eventsOf(id)).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
 
   it.each([
     ["fail", null],
@@ -451,7 +559,7 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
   });
 
   it("cancels a queued run at once, and a running one with every child under it", async () => {
-    const runs = store({ leaseSecs: 0.3 });
+    const runs = store({ leaseSecs: 1 });
     const queued = await runs.create(SPEC);
     expect(await runs.cancel(queued.id)).toBe(true);
     expect(await rowOf(queued.id)).toMatchObject({ status: "cancelled" });
@@ -462,12 +570,12 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
 
     const { id } = await runs.create(SPEC);
     const reached = gate();
-    let leaf: AbortSignal | undefined;
+    let leaf: Run | undefined;
     const driving = runs.drive(id, {
       report: async (run) => {
         const child = await run.child("plan", { kind: "plan", input: null }, async (plan) => {
           const grandchild = await plan.child("search", { kind: "search", input: null }, (r) => {
-            leaf = r.signal;
+            leaf = r;
             reached.open();
             return new Promise((_, reject) =>
               r.signal.addEventListener("abort", () => reject(r.signal.reason)),
@@ -479,9 +587,10 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
       },
     });
     await reached.opened;
-    expect(await runs.cancel(id)).toBe(true);
+    // A child's id cancels the tree it is in.
+    expect(await runs.cancel(leaf?.id ?? "")).toBe(true);
     expect(await driving).toBe("cancelled");
-    expect(leaf?.reason).toMatchObject({ code: "cancelled" });
+    expect(leaf?.signal.reason).toMatchObject({ code: "cancelled" });
 
     const { rows } = await pool.query<{ id: string; depth: number; status: string }>(
       "SELECT id, depth, status FROM app.runs WHERE root_id = $1 ORDER BY depth",
@@ -718,6 +827,202 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     expect(seen).toEqual({ resumed: true, crashes: 0, checkpoint: { step: 1 } });
   });
 
+  it("hands back a run whose claim was in flight when the drain began", async () => {
+    const claiming = gate();
+    const claimed = gate();
+    // The cast: pg's `query` has eight overloads, and this stub forwards the one the module calls.
+    const slow = {
+      connect: () => pool.connect(),
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("WITH prev AS")) {
+          claiming.open();
+          await claimed.opened;
+        }
+        return pool.query(text, values);
+      },
+    } as unknown as Pick<Pool, "query" | "connect">;
+    const runs = store({}, slow);
+    const { id } = await runs.create(SPEC);
+    let ran = false;
+    const driving = runs.drive(id, {
+      report: async () => {
+        ran = true;
+      },
+    });
+    await claiming.opened;
+    await runs.drain(0);
+    claimed.open();
+    // A `fail` run too: its handler never started, so nothing of it ran.
+    expect(await driving).toBe("requeued");
+    expect(ran).toBe(false);
+    expect(await rowOf(id)).toMatchObject({ status: "queued", error: null, crashes: 0 });
+  });
+
+  it("lets an append in flight commit before a drain closes the run", async () => {
+    const { db, held, release } = holding(isAppend);
+    const runs = store({}, db);
+    const { id } = await runs.create(SPEC);
+    const driving = runs.drive(id, {
+      report: async (run) => {
+        run.emit("delta", 1);
+        await new Promise((resolve) => run.signal.addEventListener("abort", resolve));
+      },
+    });
+    await held;
+    const drained = runs.drain(0);
+    await eventually(blocked);
+    release();
+    await drained;
+    expect(await driving).toBe("failed");
+    expect((await eventsOf(id)).map((e) => `${e.seq} ${e.type}`)).toEqual(["1 delta", "2 end"]);
+    expect(await rowOf(id)).toMatchObject({ status: "failed", error: { code: "interrupted" } });
+    expect(errors).toEqual([]);
+  });
+
+  it("closes a child whose insert was in flight when the drain began", async () => {
+    const { db, held, release } = holding(isAddChild);
+    const runs = store({}, db);
+    const { id } = await runs.create(SPEC);
+    const driving = runs.drive(id, {
+      report: (run) => run.child("c", { kind: "search", input: null }, async () => "done"),
+    });
+    await held;
+    const drained = runs.drain(0);
+    await eventually(blocked);
+    release();
+    await drained;
+    expect(await driving).toBe("failed");
+    const child = await childOf(id, "c");
+    expect(await rowOf(child)).toMatchObject({ status: "failed", error: { code: "interrupted" } });
+    expect(await eventsOf(child)).toEqual([
+      { seq: 1, type: "end", data: { status: "failed", error: { code: "interrupted" } } },
+    ]);
+    expect(errors).toEqual([]);
+  });
+
+  it("closes a child whose insert was in flight when a sweep ended its dead root", async () => {
+    const { db, held, release } = holding(isAddChild);
+    const zombie = store({}, db);
+    const { id } = await zombie.create(SPEC);
+    const go = gate();
+    const done = gate();
+    const driving = zombie.drive(id, {
+      report: async (run) => {
+        await go.opened;
+        return run.child("c", { kind: "search", input: null }, () => done.opened);
+      },
+    });
+    await eventually(async () => (await rowOf(id))?.status === "running");
+    await expireLease(id);
+    go.open();
+    await held;
+    const sweeping = store().sweep({ nudge: () => {} });
+    await eventually(blocked);
+    release();
+    expect(await sweeping).toEqual({ nudged: 0, ended: 1 });
+    const child = await childOf(id, "c");
+    expect(await rowOf(child)).toMatchObject({ status: "failed", error: { code: "interrupted" } });
+    const tailed: string[] = [];
+    for await (const event of store().tail(child)) tailed.push(event.type);
+    expect(tailed).toEqual(["end"]);
+    done.open();
+    expect(await driving).toBe("lost");
+  });
+
+  it("counts a spend that was in flight when the run was taken over", async () => {
+    const { db, held, release } = holding((text) => text.includes("cost_usd = c.cost_usd + $4"));
+    const a = store({}, db);
+    const { id } = await a.create({ ...SPEC, restart: "resume", limits: { budgetUsd: 0.5 } });
+    const go = gate();
+    const done = gate();
+    const aDriving = a.drive(id, {
+      report: async (run) => {
+        await go.opened;
+        await run.spend(0.6);
+        await done.opened;
+      },
+    });
+    await eventually(async () => (await rowOf(id))?.status === "running");
+    await expireLease(id);
+    go.open();
+    await held;
+    let ran = false;
+    const taking = store().drive(id, {
+      report: (run) =>
+        run.child("b", { kind: "search", input: null }, async () => {
+          ran = true;
+        }),
+    });
+    await eventually(blocked);
+    release();
+    expect(await taking).toBe("succeeded");
+    expect(ran).toBe(false);
+    expect(JSON.parse((await rowOf(id))?.result ?? "")).toMatchObject({
+      ok: false,
+      error: { code: "budget" },
+    });
+    done.open();
+    expect(await aDriving).toBe("lost");
+  });
+
+  it("ends a child still open when its root finishes", async () => {
+    const runs = store();
+    const { id } = await runs.create(SPEC);
+    const started = gate();
+    const late = gate();
+    let open: Promise<unknown> | undefined;
+    const outcome = await runs.drive(id, {
+      report: async (run) => {
+        open = run.child("c", { kind: "search", input: null }, async () => {
+          started.open();
+          await late.opened;
+          return "late";
+        });
+        await started.opened;
+        return "done";
+      },
+    });
+    expect(outcome).toBe("succeeded");
+    const child = await childOf(id, "c");
+    expect(await rowOf(child)).toMatchObject({ status: "failed", error: { code: "interrupted" } });
+    expect(await eventsOf(child)).toEqual([
+      { seq: 1, type: "end", data: { status: "failed", error: { code: "interrupted" } } },
+    ]);
+    late.open();
+    await expect(open).rejects.toMatchObject({ code: "lost" });
+    expect(errors).toEqual([]);
+  });
+
+  it("refuses a write through a child that already returned, and leaves the tree alone", async () => {
+    const runs = store();
+    const { id } = await runs.create(SPEC);
+    let late: unknown[] = [];
+    const outcome = await runs.drive(id, {
+      report: async (run) => {
+        let leaked: Run | undefined;
+        await run.child("a", { kind: "search", input: null }, async (child) => {
+          leaked = child;
+          return 1;
+        });
+        late = await Promise.all([
+          leaked?.spend(0.01).catch((error: unknown) => error),
+          leaked?.save({}).catch((error: unknown) => error),
+          leaked?.child("b", { kind: "search", input: null }, async () => 2).catch((e) => e),
+        ]);
+        leaked?.emit("late", {});
+        return run.signal.aborted;
+      },
+    });
+    expect(outcome).toBe("succeeded");
+    expect((await rowOf(id))?.result).toBe("false");
+    expect(errors).toHaveLength(1);
+    for (const error of [...late, ...errors]) {
+      expect(error).not.toBeInstanceOf(RunStopped);
+      expect(error).toMatchObject({ message: expect.stringContaining("already ended") });
+    }
+    expect(await eventsOf(await childOf(id, "a"))).toHaveLength(1);
+  });
+
   it("prunes finished runs older than the cutoff, with their children and events", async () => {
     const runs = store();
     const old = (await runs.create(SPEC)).id;
@@ -758,8 +1063,8 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     for (const table of ["app.runs; DROP TABLE users", "a.b.c", ""])
       expect(() => store({ table })).toThrow(TypeError);
     expect(() => store({ events: "app.run events" })).toThrow(TypeError);
-    for (const leaseSecs of [0, 31, Number.NaN])
-      expect(() => store({ leaseSecs })).toThrow("leaseSecs must be above 0 and at most 30");
+    for (const leaseSecs of [0, 16, Number.NaN])
+      expect(() => store({ leaseSecs })).toThrow("leaseSecs must be above 0 and at most 15");
   });
 
   it("refuses a limit that is not a count, or a maxParallel of 0", async () => {

@@ -1508,10 +1508,13 @@ app. It needs Node, as does `fetchClientDocument`; in a Worker, pass a random `s
 the default fetch.
 
 Your web app draws two pages, behind its own sign-in, and `oauthConsoleRoutes` is what they call.
-`approver(c, choice)` runs before every yes, never before a no: return who said yes (it reaches
-`mintKey` as `subject`), and throw your own error when they may not have another key, so the
-refusal shows on your page and not inside the client. `choice` is whatever your page sent with the
-yes, such as a workspace, or `undefined`. It came from the browser, so parse it with your schema.
+`approver(c, choice, view)` runs before every yes, never before a no: return who said yes (it
+reaches `mintKey` as `subject`), and throw your own error when they may not have another key, so
+the refusal shows on your page and not inside the client. `choice` is whatever your page sent with
+the yes, such as a workspace, or `undefined`. It came from the browser, so parse it with your
+schema. `view` is the request they said yes to, checked again just now (the consent view, or the
+device view for a code), so `view.clientName` is there to name what you create. A request that
+went stale on the page gets its refusal before `approver` runs, so nothing it does happens for one.
 
 ```ts
 const approver = async (c: Context<AppEnv>) => {

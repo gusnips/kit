@@ -863,7 +863,9 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     apps. Writing them again for Express would be two of each, so the doors stay Hono and
     `@hono/node-server`'s `getRequestListener` carries the request across. A probe ran the kit's
     `restRoutes` and `mcpRoutes` inside Express 4.22, under Bun 1.4.2 and Node 24.21, and the plain
-    recipe broke twice without a word. Under `app.use("/v1", …)` Express cuts `/v1` off the URL, so
+    recipe broke twice without a word. (Those three backends have since moved to Express 5.3, so
+    the suite runs against 5.3 now; all three planted defects below still fail there.) Under
+    `app.use("/v1", …)` Express cuts `/v1` off the URL, so
     every route answered 404. And with `express.json()` mounted first, the body was already spent:
     a POST reached the API as `{}`, an MCP call failed as a parse error, and a malformed body got
     Express's HTML page with the stack in it. That second break is the one invariant 51 refuses

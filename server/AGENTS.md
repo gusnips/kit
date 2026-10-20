@@ -766,7 +766,11 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     is refused under 32 characters or in a placeholder's shape, the same rule as `validateEnv`.
     The console routes ask the product's `approver` before every
     yes and never before a no, and answer a body the page would never send as an
-    `invalid-request` refusal, never a redirect. `oauthRoutes` counts device starts per caller on
+    `invalid-request` refusal, never a redirect. They check the request again before the
+    approver, refuse a stale one without asking it, and hand it the view (0.14.5): an adopter's
+    approver seats an agent named after the client, and without the view it described the request
+    a second time to find the name, while one asked first would seat it for a request the kit then
+    refused. The old routes and a device yes that skips the check each failed one test. `oauthRoutes` counts device starts per caller on
     the POST alone, so a preflight never spends one, and caps its bodies at 64 KiB in OAuth's
     shape. `checkOAuthTable` measures a product's migration against what the store writes. Planted
     changes (a new label, the approver on a no, no device limit, a prefix match without its slash,

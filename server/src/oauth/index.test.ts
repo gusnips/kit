@@ -18,6 +18,8 @@ import {
   oauthChallenge,
   oauthConsoleRoutes,
   oauthRoutes,
+  type ConsentView,
+  type DeviceView,
   type OAuthGrant,
   type OAuthOptions,
   type OAuthStore,
@@ -1041,7 +1043,13 @@ describe("oauthRoutes' own limits", () => {
 });
 
 describe("oauthConsoleRoutes", () => {
-  function make(approver: (c: Context, choice: unknown) => string | Promise<string>) {
+  function make(
+    approver: (
+      c: Context,
+      choice: unknown,
+      view: ConsentView | DeviceView,
+    ) => string | Promise<string>,
+  ) {
     const minted: { subject: string; keyName: string }[] = [];
     const oauth = createOAuth({
       issuer: ISSUER,
@@ -1161,6 +1169,42 @@ describe("oauthConsoleRoutes", () => {
     const long = await app.request(`/auth/oauth/request?${"a".repeat(8_193)}`);
     expect(await long.json()).toMatchObject({ data: { ok: false, reason: "invalid-request" } });
     expect(asked).toBe(0);
+  });
+
+  it("hands the approver the view the person said yes to, and never asks it about a stale one", async () => {
+    // Without the view, a product described the request again to name what it seats; asked first,
+    // its approver seated an agent for a request the kit then refused.
+    const views: unknown[] = [];
+    const { oauth, post } = make((_c, _choice, view) => {
+      views.push(view);
+      return "user-3";
+    });
+    const query = authorizeQuery(await registered(oauth)).toString();
+    const started = await oauth.deviceAuthorization({ client_id: "acme-cli" }, null);
+    const { user_code } = started.body as { user_code: string };
+
+    expect(await (await post("/approve", { query })).json()).toMatchObject({ data: { ok: true } });
+    expect(await (await post("/device", { code: user_code, decision: "approve" })).json()).toEqual({
+      data: { ok: true },
+    });
+    expect(views).toEqual([
+      expect.objectContaining({
+        ok: true,
+        clientName: "Agent",
+        redirectHost: "agent.example",
+        keyName: "Agent (agent.example)",
+      }),
+      expect.objectContaining({ ok: true, clientName: "Acme CLI", userCode: user_code }),
+    ]);
+
+    const stale = authorizeQuery("an-app-nobody-registered").toString();
+    expect(await (await post("/approve", { query: stale })).json()).toMatchObject({
+      data: { ok: false },
+    });
+    expect(
+      await (await post("/device", { code: "BBBB-BBBB", decision: "approve" })).json(),
+    ).toMatchObject({ data: { ok: false, reason: "unknown-code" } });
+    expect(views).toHaveLength(2);
   });
 
   it("shows a device code, takes a no without the approver, and a yes with it", async () => {

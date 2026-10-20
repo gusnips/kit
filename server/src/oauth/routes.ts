@@ -17,7 +17,14 @@ import { bytesOfBase64 } from "../crypto.ts";
 import { ok } from "../hono/responses.ts";
 import { rateLimit, type RateLimitStore } from "../hono/rate-limit.ts";
 import { memoryWindowStore, type RefusedHit } from "../rate-limit.ts";
-import type { ClientCredentials, OAuth, OAuthAnswer, OAuthRefusal } from "./index.ts";
+import type {
+  ClientCredentials,
+  ConsentView,
+  DeviceView,
+  OAuth,
+  OAuthAnswer,
+  OAuthRefusal,
+} from "./index.ts";
 
 const decoder = new TextDecoder();
 
@@ -129,8 +136,17 @@ export interface OAuthConsoleOptions<E extends Env = Env> {
    * when they may not: the page shows it beside the button, instead of the app failing later.
    * `choice` is whatever your page sent with the yes, such as a workspace, or `undefined`. It came
    * from the browser, so check it the way you would any input.
+   *
+   * `view` is the request the person said yes to, checked again just now: the consent view on
+   * `/approve`, the device view on `/device`. Read the client's name from it instead of describing
+   * the request a second time. A request that is no longer valid gets its refusal first, so
+   * nothing this does (seating an agent, say) happens for it.
    */
-  approver: (c: Context<E>, choice: unknown) => string | Promise<string>;
+  approver: (
+    c: Context<E>,
+    choice: unknown,
+    view: ConsentView | DeviceView,
+  ) => string | Promise<string>;
 }
 
 /**
@@ -180,8 +196,11 @@ export function oauthConsoleRoutes<E extends Env = Env>(
     const body = await jsonOf(c);
     if (typeof body?.query !== "string" || body.query.length > QUERY_MAX_LENGTH)
       return ok(c, malformed());
-    const subject = await options.approver(c, body.choice);
-    return ok(c, await oauth.approve(new URLSearchParams(body.query), subject));
+    const query = new URLSearchParams(body.query);
+    const view = await oauth.describe(query);
+    if (!view.ok) return ok(c, view);
+    const subject = await options.approver(c, body.choice, view);
+    return ok(c, await oauth.approve(query, subject));
   });
   r.get("/device", async (c) => ok(c, await oauth.describeDevice(c.req.query("code") ?? "")));
   r.post("/device", async (c) => {
@@ -190,7 +209,9 @@ export function oauthConsoleRoutes<E extends Env = Env>(
     if (typeof code !== "string" || code.length > CODE_MAX_LENGTH) return ok(c, malformed());
     if (body?.decision === "deny") return ok(c, await oauth.decideDevice(code, "deny"));
     if (body?.decision !== "approve") return ok(c, malformed());
-    const subject = await options.approver(c, body.choice);
+    const view = await oauth.describeDevice(code);
+    if (!view.ok) return ok(c, view);
+    const subject = await options.approver(c, body.choice, view);
     return ok(c, await oauth.decideDevice(code, { subject }));
   });
   return r;

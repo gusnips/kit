@@ -889,6 +889,292 @@ typecheck. BullMQ 5 brings its own ioredis 5, and its types refuse a version 6 c
 to 6 together. BullMQ 6 also dropped the `repeat` option on `add()`. `syncJobSchedulers` still
 removes a repeat that version 5 created, with its next run.
 
+## Runs that survive a restart
+
+An agent run can take minutes and cost money. When a deploy or a crash stops its process halfway,
+`/runs` makes the run either go on or end with a reason. It never stays "running" forever. The run
+is a row in Postgres, and a queue job carries only its id, so BullMQ and pg-boss both work.
+
+Add the two tables in a migration:
+
+```sql
+CREATE TABLE app.runs (
+  id uuid PRIMARY KEY,
+  root_id uuid NOT NULL,
+  parent_id uuid REFERENCES app.runs (id) ON DELETE CASCADE,
+  child_key text,
+  depth int NOT NULL DEFAULT 0,
+  kind text NOT NULL,
+  owner text NOT NULL,
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+  restart text NOT NULL DEFAULT 'fail' CHECK (restart IN ('fail', 'restart', 'resume')),
+  input json NOT NULL,
+  checkpoint json,
+  result json,
+  error json,
+  limits json NOT NULL DEFAULT '{}',
+  crashes int NOT NULL DEFAULT 0,
+  max_crashes int NOT NULL DEFAULT 5,
+  lease_token uuid,
+  lease_until timestamptz,
+  cancel_requested_at timestamptz,
+  cost_usd numeric(14, 6) NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  finished_at timestamptz,
+  CHECK ((parent_id IS NULL) = (child_key IS NULL)),
+  UNIQUE (parent_id, child_key)
+);
+CREATE INDEX runs_queued_idx ON app.runs (updated_at)
+  WHERE parent_id IS NULL AND status = 'queued';
+CREATE INDEX runs_leased_idx ON app.runs (lease_until)
+  WHERE parent_id IS NULL AND status = 'running';
+CREATE INDEX runs_root_idx ON app.runs (root_id);
+CREATE INDEX runs_finished_idx ON app.runs (finished_at)
+  WHERE parent_id IS NULL AND finished_at IS NOT NULL;
+
+CREATE TABLE app.run_events (
+  run_id uuid NOT NULL REFERENCES app.runs (id) ON DELETE CASCADE,
+  seq int NOT NULL,
+  type text NOT NULL,
+  data json,
+  at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, seq)
+);
+```
+
+The columns are `json`, not `jsonb`. `jsonb` reorders an object's keys, and a resumed transcript
+must send the provider the same bytes as before, or its prompt cache misses.
+
+Make the store, start a run, and drive it from a worker:
+
+```ts
+import { createRuns } from "@gusnips/server/runs";
+
+const runs = createRuns(pool, {
+  table: "app.runs",
+  events: "app.run_events",
+  onError: (error) => logger.error("[runs] failed", { error }),
+});
+
+const { id } = await runs.create({ kind: "report", owner: userId, input: { topic } });
+
+// In the worker, with the id from the job:
+await runs.drive(id, {
+  report: async (run) => {
+    run.emit("status", { step: "searching" });
+    const notes = await search(run.input, run.signal);
+    await run.save({ notes });
+    return await write(notes, run.signal);
+  },
+});
+```
+
+`drive` claims the run, calls the handler named by its `kind`, and records how it ended:
+`succeeded` with what the handler returned, or `failed` with `{ code: "handler", message }` when
+it threw. `onError` gets the thrown error too, with its stack. `drive` itself throws only when the
+database fails. So a job delivered twice does no harm: the second `drive` finds the run held or
+finished, and returns `"skipped"`.
+
+**When the worker dies.** A worker holds its run with a lease, renewed every 5 seconds. A lease
+that is not renewed runs out after 15. The next `drive` then takes the run over, counts a crash,
+and does what the run's `restart` says:
+
+- `fail`, the default: the run ends `failed` with code `interrupted`.
+- `restart`: the handler runs again from the start.
+- `resume`: the handler runs again, with `run.checkpoint` set to what it last passed to
+  `run.save`. Whatever it did after that save runs twice, so make those steps safe to repeat.
+  `run.resumed` is true, and `run.crashes` says how many times this happened.
+
+After 5 crashes (`maxCrashes`) the run ends `failed` with code `restart_limit`, so a run that kills
+its worker every time stops being retried.
+
+**A worker that comes back late changes nothing.** A process paused past its lease (a long garbage
+collection, a frozen VM) still has its handler running. Every `run.save` it makes throws, its
+events are dropped, and `run.signal` aborts with a `RunStopped` whose `code` is `"lost"`. A worker
+whose renewals go unanswered for 15 seconds, on a stuck database or a dropped network, aborts its
+`run.signal` the same way without waiting to find out. Pass `run.signal` to every provider call,
+so the late handler stops paying for tokens.
+
+**Events.** `run.emit(type, data)` returns at once, and the appends run in order behind the work.
+`runs.tail(id, afterSeq, signal)` yields every event after `afterSeq`, then each new one, until the
+run finishes. Every way a run ends adds a last event, `end`, with its `status` and `error`. As a
+Server-Sent Events stream:
+
+```ts
+import { streamSSE } from "hono/streaming";
+
+app.get("/runs/:id/events", async (c) => {
+  // Check that the run belongs to the caller first. This module checks nothing.
+  const after = Number(c.req.header("last-event-id")) || 0;
+  return streamSSE(c, async (stream) => {
+    for await (const event of runs.tail(c.req.param("id"), after, c.req.raw.signal))
+      await stream.writeSSE({
+        id: String(event.seq),
+        event: event.type,
+        data: JSON.stringify(event.data),
+      });
+  });
+});
+```
+
+A client that reconnects sends its `Last-Event-ID`, and picks up after the last event it saw. A
+tail reads the table once a second, so an event can reach it up to a second late.
+
+**Children.** `run.child(key, spec, fn)` runs `fn` as a child run, with its own row, events and
+checkpoint. It runs in the same process, under the root's lease. `limits` on the root cap the
+whole tree:
+
+```ts
+const { id } = await runs.create({
+  kind: "report",
+  owner: userId,
+  input: { topics },
+  restart: "resume",
+  limits: { maxParallel: 3, maxChildren: 8, maxDepth: 2, budgetUsd: 1.5 },
+});
+
+// In the handler:
+const found = await Promise.all(
+  topics.map((topic) =>
+    run.child(topic, { kind: "search", input: { topic } }, async (child) => {
+      const { notes, usd } = await search(topic, child.signal);
+      await child.spend(usd);
+      return notes;
+    }),
+  ),
+);
+const notes = found.flatMap((result) => (result.ok ? [result.value] : []));
+```
+
+- A child is kept under its parent and its `key`. After a restart, a child that already finished
+  is not run again: `child` returns its stored result. A child the dead worker left unfinished goes
+  by its own `restart`, which is the root's unless you set it.
+- `child` never throws for what the child did. It returns `{ ok: true, value }`, or
+  `{ ok: false, error }` where `error.code` is `handler` (it threw), `interrupted` or `cancelled`.
+- A child past a limit is refused before it starts, with code `max_depth`, `max_children` or
+  `budget`. `maxParallel` caps the children running at once. A child waiting on its own children
+  lends them its place, so a deep tree never waits on itself.
+- `run.spend(usd)` adds to the tree's spend, and the total is read back at every claim. A resumed
+  run counts what it spent before, so it cannot buy past `budgetUsd` a second time.
+- Use a child's `run` only inside its function. After the function returns, `save`, `spend` and
+  `child` on it throw, and `emit` goes to `onError`. The rest of the tree goes on.
+
+**Cancel.** `runs.cancel(id)` stops a run and every child under it. Given a child's id, it stops
+the whole tree that child is in. A queued run ends at once. A running one finds out at its worker's
+next heartbeat, within 5 seconds: `run.signal` aborts with code `cancelled`, and the run ends
+`cancelled` unless it already finished its work. It returns false when the run had already
+finished. Check that the run belongs to the caller first.
+
+**On BullMQ**, add the job after the transaction that created the run has committed, or a worker
+can take it before the row is there:
+
+```ts
+import { createQueue, createWorker } from "@gusnips/server/bullmq";
+
+const runQueue = createQueue<{ runId: string }>("runs", {
+  connection: redis,
+  onError,
+  defaultJobOptions: { attempts: 1 },
+});
+const worker = createWorker<{ runId: string }>(
+  "runs",
+  (job) => runs.drive(job.data.runId, handlers),
+  { connection: redis, onError },
+);
+
+await runQueue.add("run", { runId: id }, { jobId: id });
+```
+
+`attempts: 1`, because a retry of `drive` would only find what the first one left. The `jobId`
+makes a second add a no-op while the job exists. BullMQ re-runs the job of a worker that died, but
+it can do so about 15 seconds after the death, while the run's lease may still hold. That re-run
+finds the run held, returns `"skipped"`, and BullMQ counts the job as done. So the sweep below is
+required on BullMQ too: it is what sends that run out again.
+
+**On pg-boss**, send the job inside the transaction that creates the run, so neither exists
+without the other:
+
+```ts
+await boss.createQueue("runs", { name: "runs", policy: "short" });
+await boss.work<{ runId: string }>("runs", async ([job]) => {
+  if (job) await runs.drive(job.data.runId, handlers);
+});
+
+// Inside your transaction, on its client:
+const { id } = await runs.create({ kind: "report", owner: userId, input: { topic } }, client);
+await boss.send(
+  "runs",
+  { runId: id },
+  {
+    db: { executeSql: (text, values) => client.query(text, values) },
+    singletonKey: id,
+    retryLimit: 0,
+  },
+);
+```
+
+The `short` policy keeps one waiting job per `singletonKey`, so a second send for the same run is
+dropped. Without `singletonKey` it would keep one waiting job for the whole queue. A duplicate
+would be harmless anyway, because only one `drive` can claim a run; the policy only saves work.
+
+**Sweep on boot, then every minute, on either queue.** A run can be left with no job: its job
+failed for good, its job came back while the lease still held, a drain put it back, or Redis lost
+it. `runs.sweep` finds those and calls your `nudge` to add the job again. It also ends a dead
+worker's run that its policy ends, without waiting for a job.
+
+```ts
+import { removeLeftoverJob } from "@gusnips/server/bullmq";
+
+const nudge = async (runId: string) => {
+  await removeLeftoverJob(await runQueue.getJob(runId));
+  await runQueue.add("run", { runId }, { jobId: runId });
+};
+await runs.sweep({ nudge, olderThanSecs: 0 });
+setInterval(() => runs.sweep({ nudge }).catch(onError), 60_000);
+```
+
+On boot it sends out every queued run. After that, only those queued for 2 minutes
+(`olderThanSecs`, default 120), so a job that was just added is not sent twice. A run whose
+worker died is sent out at every sweep until a worker takes it. On pg-boss, `nudge` is
+`(runId) => boss.send("runs", { runId }, { singletonKey: runId, retryLimit: 0 })`, and the sweep
+is the only thing that brings a dead worker's run back: with `retryLimit: 0`, pg-boss fails the
+job when it expires (15 minutes by default) and never runs it again.
+
+**On a deploy, drain before the worker closes:**
+
+```ts
+drainWith(
+  createShutdown(
+    [
+      bunServerStep(server, { graceMs: 5_000 }),
+      { name: "runs", run: () => runs.drain(10_000) },
+      { name: "worker", run: () => worker.close(redis.status !== "ready") },
+      { name: "redis", run: () => quitRedis(redis) },
+      { name: "postgres", run: () => pool.end() },
+    ],
+    { hardExitMs: 25_000, logger },
+  ),
+);
+```
+
+`runs.drain(10_000)` stops claiming runs and gives the ones in flight 10 seconds to finish. Then
+it stops the rest: `run.signal` aborts with code `shutdown`, a `resume` or `restart` run goes back
+in the queue with its children, and a `fail` run ends `interrupted`. A run whose claim was still
+on its way when the drain began goes back in the queue before its handler starts, whatever its
+`restart`. A drain is not a crash, so `crashes` does not go up. The next process's boot sweep sends
+the queued runs out again.
+
+The order matters. `worker.close()` waits for every job in flight, and a run can take minutes.
+After the drain, every handler that passes `run.signal` on has already returned, so it closes at
+once. Postgres closes last, because the drain
+writes to it. `hardExitMs` must be longer than all the steps together.
+
+**Prune once a day.** `runs.prune(30)` deletes the runs that finished more than 30 days ago, with
+their children and events.
+
 ## A rate limit
 
 ```ts

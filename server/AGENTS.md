@@ -1,9 +1,9 @@
 Rules for `@gusnips/server`. Layout, commands, publishing and house rules are in the root
 `AGENTS.md`. The server invariants run across three files: 1 to 20 in `migrate/AGENTS.md`, 21 to
-52 here, 53 to 56 in `sdkgen/AGENTS.md`. Each one is a bug a donor shipped, or a fix a donor had
+52 and 57 here, 53 to 56 in `sdkgen/AGENTS.md`. Each one is a bug a donor shipped, or a fix a donor had
 and the others did not. The tests pin them.
 
-# Invariants 21 to 52, for `@gusnips/server`
+# Invariants 21 to 52 and 57, for `@gusnips/server`
 
 21. **A success builder returns an ANSWER, not a body — so on Hono, import the adapters.** `ok`,
     `created`, `paginated` and `noContent` in `responses.ts` answer `{ status, body }`, because the
@@ -886,3 +886,31 @@ Unhandled error event:", ...)` and returns — it never emits, so Node's throw i
     left it on. The test reads both globals before any bridge exists and checks them after one
     serves, so a swap by any earlier test still shows; with the old call put back it fails on Node
     and on Bun.
+
+53 to 56 are `@gusnips/sdkgen`'s, in `sdkgen/AGENTS.md`, so the next one here is 57.
+
+57. **Every write in a run's tree is checked against the lease token on its root row, and a
+    child carries its root's token.** A worker can stop for longer than its lease (a long GC
+    pause, a stalled event loop, a laptop lid) and wake up still inside its handler. By then
+    another worker may have taken the run over. If the late worker's `save`, `emit` or finish
+    still landed, it would put back an older checkpoint, write events at the seq numbers the new
+    holder is using, and finish the run with a result nobody is waiting for. So each of those
+    writes names the root's token in its `WHERE`, a write that finds another token changes
+    nothing, and the late worker's `run.signal` aborts with `lost`. The root, not each run,
+    because a tree has one holder: a child that checked only its own row would let a late
+    parent's child write under the new holder. An append, or a write below the root, takes the
+    root row `FOR SHARE`, so it commits before a takeover's claim or a close, or not at all. That
+    helps only a statement that starts after the wait: Postgres reads again the row a statement
+    waited on, and nothing else, so a close written as one statement missed a child added during
+    its wait, which stayed open under a finished root, and its closing event took the seq of an
+    append that landed then. So every close (finish, drain, cancel, sweep) is one transaction
+    whose first statement takes the root `FOR UPDATE`, and a new holder reads the last seq, the
+    children and the spend in a statement after its claim. A write to the root row itself is
+    fenced by its own `WHERE`, which Postgres reads again after a lock wait; taking the share lock
+    there as well would let two writers on the same row deadlock. And a worker whose heartbeat
+    goes a whole lease unanswered stops itself with `lost`: a hung heartbeat must not keep it
+    working while another worker takes the run over. The tests expire one worker's lease in the
+    database, let a second worker take the run over, and check that the first one's save, events
+    and finish change nothing. They hold an append, a child insert and a spend open in their own
+    transactions while a drain, a sweep and a takeover wait on them. And they hang the heartbeat
+    of a one-second lease and check that the handler's signal aborts on its own.

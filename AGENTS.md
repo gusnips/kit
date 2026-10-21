@@ -21,7 +21,7 @@ folder you change.
 | `react/AGENTS.md`   | frontend invariants 16 to 21, for anything under `react/src/ui/`       |
 | `tokens/AGENTS.md`  | the token contract, measured                                           |
 | `migrate/AGENTS.md` | server invariants 1 to 20, the SSL helper, and what the build measured |
-| `server/AGENTS.md`  | server invariants 21 to 52                                             |
+| `server/AGENTS.md`  | server invariants 21 to 52, and 57                                     |
 | `sdkgen/AGENTS.md`  | server invariants 53 to 56                                             |
 | `MIGRATIONS.md`     | what moving each app onto the frontend packages taught                 |
 
@@ -230,6 +230,7 @@ dedup, the same as in the frontend packages.
         ├── pg/           ← createPgPool() with a bounded wait; createIdempotency(); the OAuth store
         ├── redis/        ← createRedis(), the bounded probes, and the rate-limit window store
         ├── bullmq/       ← queues that delete finished jobs, the dead letter, the schedule sync
+        ├── runs/         ← createRuns(): agent runs on Postgres that a dead worker cannot strand
         ├── mcp/          ← the MCP door: tools that never throw, a limit per call, POST only
         ├── oauth/        ← sign-in for the MCP door: codes with PKCE, client documents, the device flow
         ├── openapi/      ← buildOpenApi(): the reference from the operation list, on the public origin

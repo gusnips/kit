@@ -193,16 +193,20 @@ export interface FaqEntry {
 }
 
 /**
- * FAQ structured data for `headExtra`, with the script-closing sequence escaped.
+ * Structured data for `headExtra`. The caller owns the schema and its claims.
  *
- * A `</script>` inside an answer ends the element early and ships the rest of the JSON as markup.
- * `<\/` is the same string to a JSON parser and inert to an HTML one, so every `</` becomes `<\/`
- * and `<!--` becomes `<\!--`. `JSON.stringify` never emits `<` outside a string, since the
- * structural characters are all brackets, quotes and digits. The replacement only ever touches
- * copy.
+ * Escape every less-than character as JSON, not HTML: `</script>` can close the element, and
+ * `<!--<script>` can make the HTML parser swallow the real closing tag. Escaping only a slash
+ * misses that second case; adding a backslash before `!` makes the JSON invalid.
  */
+export function jsonLd(data: object): string {
+  const json = JSON.stringify(data).replace(/</g, "\\u003c");
+  return `<script type="application/ld+json">${json}</script>`;
+}
+
+/** FAQ structured data from the same strings the page renders. */
 export function faqJsonLd(faqs: readonly FaqEntry[]): string {
-  const data = {
+  return jsonLd({
     "@context": "https://schema.org",
     "@type": "FAQPage",
     mainEntity: faqs.map((faq) => ({
@@ -210,9 +214,7 @@ export function faqJsonLd(faqs: readonly FaqEntry[]): string {
       name: faq.question,
       acceptedAnswer: { "@type": "Answer", text: faq.answer },
     })),
-  };
-  const json = JSON.stringify(data).replace(/<\//g, "<\\/").replace(/<!--/g, "<\\!--");
-  return `<script type="application/ld+json">${json}</script>`;
+  });
 }
 
 /**

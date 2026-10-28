@@ -18,6 +18,17 @@
  * and a repo that only wants a sitemap all install exactly what they use.
  */
 export { resolveKey } from "./catalog.ts";
+export {
+  llmsTxt,
+  mcpDiscoveryJson,
+  type LlmsLink,
+  type LlmsSection,
+  type LlmsTxtOptions,
+  type McpDiscoveryAuthentication,
+  type McpDiscoveryDocument,
+  type McpDiscoveryServer,
+  type McpDiscoveryTool,
+} from "./discovery.ts";
 // `headExtra` takes raw markup, so the moment an adopter builds a tag out of its own copy it
 // needs the same escaping every tag this package writes already gets. Exported rather than
 // re-invented per app: an adopter's hand-rolled copy is one that can drift from ours, and the
@@ -28,6 +39,7 @@ export {
   bakeHead,
   EMPTY_ROOT,
   faqJsonLd,
+  jsonLd,
   ogLocale,
   type Alternate,
   type FaqEntry,

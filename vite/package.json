@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/vite",
-  "version": "0.8.43",
+  "version": "0.8.44",
   "description": "The build-time half of a prerendered Vite SPA: head baking, sitemap, robots, the prerender driver, a shared vite preset, and the translation catalog check.",
   "type": "module",
   "license": "MIT",

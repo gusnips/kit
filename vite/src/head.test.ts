@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PRERENDERED_ROUTE_ATTR } from "@gusnips/react";
-import { assertRendered, bakeHead, faqJsonLd, ogLocale } from "./head.ts";
+import { assertRendered, bakeHead, faqJsonLd, jsonLd, ogLocale } from "./head.ts";
 
 /**
  * Every failure `bakeHead` has is invisible until somebody reads a search result months later
@@ -433,6 +433,37 @@ describe("assertRendered", () => {
   });
 });
 
+describe("jsonLd", () => {
+  it("keeps the caller's schema and fields", () => {
+    const data = {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "SoftwareApplication",
+          name: "Example",
+          applicationCategory: "DeveloperApplication",
+        },
+        { "@type": "WebAPI", name: "Example API", documentation: "https://example.com/docs" },
+      ],
+    };
+    const script = jsonLd(data);
+    expect(script.startsWith('<script type="application/ld+json">')).toBe(true);
+    expect(JSON.parse(script.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, ""))).toEqual(
+      data,
+    );
+  });
+
+  it("round-trips HTML parser control text without exposing markup", () => {
+    const data = { name: '</ScRiPt><img src=x onerror="x"> <!-- <script> $$ \\u003c' };
+    const script = jsonLd(data);
+    const inner = script.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
+    expect(inner).not.toContain("<");
+    expect(JSON.parse(inner)).toEqual(data);
+    expect(script.match(/<script/g)).toHaveLength(1);
+    expect(script.match(/<\/script>/g)).toHaveLength(1);
+  });
+});
+
 describe("faqJsonLd", () => {
   // One donor's template carried four questions where the page renders seven: the fix is to
   // generate the block from the same strings, not to keep a second copy beside them.
@@ -448,15 +479,12 @@ describe("faqJsonLd", () => {
     expect(script.match(/"@type":"Question"/g)).toHaveLength(2);
   });
 
-  // A `</script>` inside an answer ends the element early and ships the rest of the JSON as
-  // markup. `<\/` is the same string to a JSON parser and inert to an HTML one.
   it("escapes a script-closing sequence inside an answer", () => {
     const script = faqJsonLd([
       { question: "What if I write code?", answer: "Wrap it: </script> ends the block." },
     ]);
     expect(script).not.toContain("</script> ends");
-    expect(script).toContain("<\\/script> ends");
-    // …and what it emits still parses, back to the original copy.
+    expect(script).toContain("\\u003c/script> ends");
     const json = script.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
     const parsed = JSON.parse(json) as {
       mainEntity: Array<{ acceptedAnswer: { text: string } }>;
@@ -464,11 +492,13 @@ describe("faqJsonLd", () => {
     expect(parsed.mainEntity[0]?.acceptedAnswer.text).toBe("Wrap it: </script> ends the block.");
   });
 
-  // The positive control for the direction that flatters: an answer WITH markup must fail this
-  // test if the escaping ever stops running, not pass because the assertion went missing.
-  it("leaves no raw `</` sequence anywhere in the block", () => {
-    const script = faqJsonLd([{ question: "q", answer: "a </b> b <!-- c" }]);
-    const inner = script.replace(/<script[^>]*>/g, "").replace(/<\/script>/g, "");
-    expect(inner).not.toMatch(/<\//);
+  it("keeps comments valid JSON and inert to the HTML parser", () => {
+    const answer = "a </b> b <!-- <script> c";
+    const script = faqJsonLd([{ question: "q", answer }]);
+    const inner = script.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
+    expect(inner).not.toContain("<");
+    expect(JSON.parse(inner)).toMatchObject({
+      mainEntity: [{ acceptedAnswer: { text: answer } }],
+    });
   });
 });

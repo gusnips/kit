@@ -63,6 +63,87 @@ Four rules in there are load-bearing:
   points back at the others, which is why you pass the full list to every page rather than "the
   other two".
 
+## Discovery files
+
+```ts
+import { jsonLd } from "@gusnips/vite";
+
+jsonLd({ "@type": "SoftwareApplication", name: "Example" });
+// A <script type="application/ld+json"> tag containing the object.
+```
+
+Pass the result to `bakeHead` as `headExtra`. `jsonLd` escapes HTML control text while keeping
+valid JSON. `faqJsonLd` uses the same serializer. You supply the schema.org fields, including
+`SoftwareApplication` for an app or `WebAPI` for a public API. A local command is not a public API.
+
+```ts
+import { llmsTxt, mcpDiscoveryJson, writeDist } from "@gusnips/vite";
+
+await writeDist(
+  "dist",
+  "llms.txt",
+  llmsTxt({
+    title: "Example",
+    summary: "Read and update tasks.",
+    sections: [
+      {
+        title: "Reference",
+        links: [{ title: "Connect", url: "https://example.com/docs/mcp" }],
+      },
+    ],
+  }),
+);
+
+await writeDist(
+  "dist",
+  "llms-full.txt",
+  llmsTxt({
+    title: "Example reference",
+    body: referenceMarkdown,
+  }),
+);
+
+await writeDist(
+  "dist",
+  ".well-known/mcp.json",
+  mcpDiscoveryJson({
+    name: "Example",
+    homepage: "https://example.com",
+    documentation: "https://example.com/docs/mcp",
+    llmsTxt: "https://example.com/llms.txt",
+    llmsFullTxt: "https://example.com/llms-full.txt",
+    servers: [
+      {
+        name: "tasks",
+        transport: "streamable-http",
+        url: "https://api.example.com/mcp",
+        authentication: [
+          {
+            type: "oauth2",
+            protectedResourceMetadata:
+              "https://api.example.com/.well-known/oauth-protected-resource/mcp",
+          },
+        ],
+        tools: ["list_tasks", "update_task"],
+      },
+    ],
+  }),
+);
+```
+
+Build `referenceMarkdown` from your existing docs. The formatter adds no content or access rules.
+Each server lists only its own tools, as names or objects with `name`, `title`, `description`,
+`inputSchema` and `annotations`. Supplied schemas and annotations are kept unchanged.
+
+For a local server, use `transport: "stdio"`, `command` and optional `args` instead of `url`.
+`authentication` is a list of accepted methods: `oauth2` with `protectedResourceMetadata`, `api-key`
+with `in` (`header` or `environment`), `name` and optional `prefix`, `session` with a `description`,
+or `none` for public access. Methods can also include `description` and `documentation`.
+
+`/.well-known/mcp.json` is discovery metadata, not a universal MCP standard or a client config.
+It does not replace the live server's `tools/list`. These files do not promise search rankings or
+support in a particular client.
+
 ## Rendering
 
 ```ts

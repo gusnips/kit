@@ -13,7 +13,7 @@
  * otherwise force on everyone: the vite config preset at `@gusnips/vite/preset` (the React and
  * Tailwind plugins), `renderTree` at `@gusnips/vite/render`, the theme pre-paint plugin at
  * `@gusnips/vite/theme` (both React itself), the catalog check at `@gusnips/vite/i18n`, and the
- * contrast gate at `@gusnips/vite/contrast` (tailwindcss). The last two run in CI and never in a
+ * contrast gate at `@gusnips/vite/contrast` (tailwindcss, for the class reading only). The last two run in CI and never in a
  * build. Nothing here imports React, vite or tailwindcss, so a prerender script, an OG generator
  * and a repo that only wants a sitemap all install exactly what they use.
  */

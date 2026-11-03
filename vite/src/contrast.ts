@@ -30,9 +30,20 @@
  * - **dead**: a class that compiles to no rule at all — a token Tailwind does not have, or a
  *   name the scanner caught half of. A warning: dynamic construction reads the same way.
  *
+ * `checkContrast` is the Tailwind reading. `checkTokenPairs` (further down) is the other one, for
+ * an app whose colours are plain CSS custom properties: it reads a light block and a dark block as
+ * text, holds a list of pairs to a floor in both, and reports through the same problems and the
+ * same formatter. It adds two rules:
+ *
+ * - **missing**: a colour one theme declares and the other does not, or a pair that names a token
+ *   neither declares. A typo in a pair would otherwise read as a pair that passes.
+ * - **mirror**: the system fallback (the dark colours repeated under `prefers-color-scheme` for a
+ *   page that has chosen no theme) differs from the dark block, or sits outside that query.
+ *
  * Runs on node and bun: `fs.promises.glob`, never Bun's `Glob`, and no `import.meta.dir`.
- * Needs `@tailwindcss/cli` installed where it runs (an optional peer, reachable only from
- * `@gusnips/vite/contrast`), because the fixture is compiled, not guessed.
+ * `checkContrast` needs `@tailwindcss/cli` installed where it runs (an optional peer, reachable
+ * only from `@gusnips/vite/contrast`), because the fixture is compiled, not guessed.
+ * `checkTokenPairs` compiles nothing and needs no peer.
  */
 import { spawnSync } from "node:child_process";
 import { glob, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -56,7 +67,8 @@ export interface CheckContrastOptions {
   root?: string;
 }
 
-export type ContrastRule = "load" | "floor" | "retune" | "rebind" | "untokened" | "hover" | "dead";
+export type ContrastRule =
+  "load" | "floor" | "retune" | "rebind" | "untokened" | "hover" | "dead" | "missing" | "mirror";
 
 export interface ContrastProblem {
   rule: ContrastRule;
@@ -149,6 +161,13 @@ const ATTR = /\bclass(?:Name)?\s*=\s*(?:"([^"]*)"|'([^']*)'|`((?:[^`$]|\$(?!\{))
 const HELPER = /\b(?:cn|clsx|cva|twMerge|twJoin)\s*\(([^)]*)\)/g;
 const STR = /"([^"]*)"|'([^']*)'/g;
 
+/** The 1-based line a character offset falls on. */
+function lineAt(source: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i++) if (source.charCodeAt(i) === 10) line++;
+  return line;
+}
+
 const skipped = (file: string): boolean =>
   /(?:^|\/)__tests__\//.test(file) || /\.(test|spec)\.[tj]sx?$/.test(file);
 
@@ -164,11 +183,6 @@ async function scanSources(
       if (!skipped(file)) files.add(file);
     }
   }
-  const lineAt = (source: string, index: number): number => {
-    let line = 1;
-    for (let i = 0; i < index; i++) if (source.charCodeAt(i) === 10) line++;
-    return line;
-  };
   const keep = (raw: string, file: string, index: number, source: string): void => {
     for (const cls of raw.split(/\s+/).filter(Boolean)) {
       // A token that would break the fixture's quoting is skipped rather than escaped:
@@ -505,4 +519,357 @@ export function formatContrastReport(report: ContrastReport): string {
       : `✖ contrast: ${errors} error(s)${warnings > 0 ? `, ${warnings} warning(s)` : ""}`,
   );
   return lines.join("\n");
+}
+
+// ── Plain CSS tokens ──────────────────────────────────────────────────────────
+// The same gate for an app with no Tailwind `@theme`: its colours are custom properties in a
+// light block and a dark block, and a list of pairs that must stay readable in both. The file is
+// read as text and nothing is compiled, so this reading installs no optional peer.
+//
+// The limits are stated rather than hidden: hex colours only (a pair that names anything else
+// fails as unmeasurable, never passes), blocks found by their selector text, and a block that
+// holds another block (nested CSS) is not read. There is no CSS parser here. If themes outgrow
+// flat blocks, replace `leafRules` with one.
+
+/** Two custom properties, `[background, foreground]`, written as the CSS names them:
+ *  `["--ground", "--ink"]`. The ratio is the same either way round; the order only decides how a
+ *  problem reads. */
+export type TokenPair = readonly [background: string, foreground: string];
+
+export interface TokenPairsBundle {
+  /** Shown beside every problem: `"apps/site"`. */
+  name: string;
+  /** The stylesheet holding the colour blocks, relative to `root`. */
+  css: string;
+  /** The selector of the light block. Default `":root"`. It must differ from `dark`. */
+  light?: string;
+  /** The selector of the dark block: `':root[data-theme="dark"]'`. */
+  dark: string;
+  /**
+   * The selector of the system fallback: the dark colours again, for a page that has chosen no
+   * theme, inside `@media (prefers-color-scheme: dark)`: `":root:not([data-theme])"`. It must
+   * hold exactly the dark block's tokens and values. Leave it off when there is none.
+   */
+  system?: string;
+  /** Pairs read as text. Held to `textFloor`. */
+  textPairs?: readonly TokenPair[];
+  /** Pairs that are not text: borders, focus rings, icons. Held to `nonTextFloor`. */
+  nonTextPairs?: readonly TokenPair[];
+  /** Default 4.5 (WCAG 1.4.3). */
+  textFloor?: number;
+  /** Default 3 (WCAG 1.4.11). */
+  nonTextFloor?: number;
+}
+
+/** The hex colours of each theme, `--ground` → `#ffffff`, for a check of your own. */
+export interface TokenThemes {
+  light: Map<string, string>;
+  dark: Map<string, string>;
+}
+
+interface TokenDecl {
+  value: string;
+  line: number;
+}
+
+interface CssRule {
+  selectors: string[];
+  /** The at-rules around it, outermost first: `@media screen @media (prefers-color-scheme: dark)`. */
+  within: string;
+  tokens: Map<string, TokenDecl>;
+}
+
+interface TokenBlock {
+  tokens: Map<string, TokenDecl>;
+  /** `within` of every block that matched, since one selector may be written twice. */
+  within: string[];
+}
+
+interface TokenBlocks {
+  light: TokenBlock;
+  dark: TokenBlock;
+  /** `null` when the bundle names no system block, or names one that is not in the file. */
+  system: TokenBlock | null;
+}
+
+const PREFERS_DARK = /\(\s*prefers-color-scheme\s*:\s*dark\s*\)/;
+
+/** `:root[data-theme='dark']` and `:root[data-theme="dark"]` are the same selector. */
+const selectorOf = (text: string): string => text.replace(/\s+/g, " ").replace(/'/g, '"').trim();
+
+/** The comparable form of a value: `#FFF` and `#ffffff` are one colour. */
+const canonical = (value: string): string =>
+  normalizeHex(value) ?? value.replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * Every innermost `selector { … }` block with the at-rules around it, and the custom properties
+ * it declares. Text, not syntax: a brace or semicolon inside a string or `url()` is not understood.
+ */
+function leafRules(css: string): CssRule[] {
+  // Comments become spaces, so a `{` in one is not a block and every offset still names its line.
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, " "));
+  const rules: CssRule[] = [];
+  const open: Array<{ prelude: string; bodyAt: number; nested: boolean }> = [];
+  let preludeFrom = 0;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (char === "{") {
+      const parent = open.at(-1);
+      if (parent !== undefined) parent.nested = true;
+      open.push({ prelude: source.slice(preludeFrom, i).trim(), bodyAt: i + 1, nested: false });
+      preludeFrom = i + 1;
+    } else if (char === "}") {
+      const block = open.pop();
+      preludeFrom = i + 1;
+      if (block === undefined || block.nested || block.prelude.startsWith("@")) continue;
+      const tokens = new Map<string, TokenDecl>();
+      for (const match of source.slice(block.bodyAt, i).matchAll(/(--[\w-]+)\s*:\s*([^;]*)/g)) {
+        tokens.set(match[1] ?? "", {
+          value: (match[2] ?? "").trim(),
+          line: lineAt(source, block.bodyAt + match.index),
+        });
+      }
+      rules.push({
+        selectors: block.prelude.split(",").map(selectorOf),
+        within: open
+          .map((parent) => parent.prelude)
+          .filter((prelude) => prelude.startsWith("@"))
+          .join(" "),
+        tokens,
+      });
+    } else if (char === ";") {
+      preludeFrom = i + 1;
+    }
+  }
+  return rules;
+}
+
+/** Every block written with this selector, merged: a later token wins, as it does in CSS. */
+function blockOf(rules: readonly CssRule[], selector: string): TokenBlock | null {
+  const wanted = selectorOf(selector);
+  const found = rules.filter((rule) => rule.selectors.includes(wanted));
+  if (found.length === 0) return null;
+  const tokens = new Map<string, TokenDecl>();
+  for (const rule of found) for (const [name, decl] of rule.tokens) tokens.set(name, decl);
+  return { tokens, within: found.map((rule) => rule.within) };
+}
+
+/** Throws when the file or a block the bundle names is not there. The system block may be absent:
+ *  whether that is a problem is the check's question, not the loader's. */
+async function readTokenBlocks(
+  bundle: Pick<TokenPairsBundle, "css" | "light" | "dark" | "system">,
+  root: string,
+): Promise<TokenBlocks> {
+  const css = await readFile(resolve(root, bundle.css), "utf8").catch(() => null);
+  // A stylesheet that does not load reads as one with no tokens, which would pass every rule
+  // below. It fails instead, the same reason `checkContrast` has a load rule.
+  if (css === null) throw new Error(`${bundle.css} could not be read`);
+  const rules = leafRules(css);
+  const required = (label: string, selector: string): TokenBlock => {
+    const block = blockOf(rules, selector);
+    if (block === null) {
+      throw new Error(
+        `${bundle.css} has no \`${selector}\` block for the ${label} colours. A block is found by ` +
+          `its selector text, inside any @media, and holds declarations only`,
+      );
+    }
+    return block;
+  };
+  const lightSelector = bundle.light ?? ":root";
+  if (selectorOf(lightSelector) === selectorOf(bundle.dark)) {
+    throw new Error(`the light and dark selectors are both \`${lightSelector}\`; they must differ`);
+  }
+  return {
+    light: required("light", lightSelector),
+    dark: required("dark", bundle.dark),
+    system: bundle.system === undefined ? null : blockOf(rules, bundle.system),
+  };
+}
+
+/** The tokens whose value is a hex colour, as `#rrggbb`. Type and geometry are left out. */
+function hexTokens(tokens: ReadonlyMap<string, TokenDecl>): Map<string, string> {
+  const hex = new Map<string, string>();
+  for (const [name, { value }] of tokens) {
+    const colour = normalizeHex(value);
+    if (colour !== null) hex.set(name, colour);
+  }
+  return hex;
+}
+
+/**
+ * The two palettes of a bundle as hex maps, for a check of your own that needs the colours
+ * (the browser's toolbar colour should be the page's ground, in each theme):
+ *
+ * ```ts
+ * const { light, dark } = await loadTokenThemes({ css: "src/tokens.css", dark: '[data-theme="dark"]' });
+ * light.get("--ground"); // "#ffffff"
+ * ```
+ *
+ * Throws, saying what is missing, when the file or one of the two blocks is not there.
+ */
+export async function loadTokenThemes(
+  bundle: Pick<TokenPairsBundle, "css" | "light" | "dark">,
+  options: CheckContrastOptions = {},
+): Promise<TokenThemes> {
+  const { light, dark } = await readTokenBlocks(bundle, options.root ?? process.cwd());
+  return { light: hexTokens(light.tokens), dark: hexTokens(dark.tokens) };
+}
+
+async function checkTokenBundle(
+  bundle: TokenPairsBundle,
+  options: CheckContrastOptions,
+  report: ContrastReport,
+): Promise<void> {
+  const problem = (p: Omit<ContrastProblem, "bundle" | "level">): void => {
+    report.problems.push({ bundle: bundle.name, level: "error", ...p });
+  };
+  const at = (decl: TokenDecl | undefined): string =>
+    decl === undefined ? bundle.css : `${bundle.css}:${String(decl.line)}`;
+
+  let blocks: TokenBlocks;
+  try {
+    blocks = await readTokenBlocks(bundle, options.root ?? process.cwd());
+  } catch (error) {
+    problem({ rule: "load", message: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  const { light, dark, system } = blocks;
+  const themes: Array<[mode: string, tokens: Map<string, TokenDecl>]> = [
+    ["light", light.tokens],
+    ["dark", dark.tokens],
+  ];
+  const textPairs = bundle.textPairs ?? [];
+  const nonTextPairs = bundle.nonTextPairs ?? [];
+
+  // ── Every colour has both themes, and every pair names a real token ──
+  const wanted = new Set([
+    ...hexTokens(light.tokens).keys(),
+    ...hexTokens(dark.tokens).keys(),
+    ...[...textPairs, ...nonTextPairs].flat(),
+  ]);
+  for (const token of wanted) {
+    const inLight = light.tokens.get(token);
+    const inDark = dark.tokens.get(token);
+    if (inLight !== undefined && inDark !== undefined) continue;
+    if (inLight === undefined && inDark === undefined) {
+      problem({
+        rule: "missing",
+        at: bundle.css,
+        message:
+          `a pair names \`${token}\`, which neither the light nor the dark block declares` +
+          (token.startsWith("--") ? "" : ". Custom property names start with --"),
+      });
+      continue;
+    }
+    const [have, lack] = inLight === undefined ? ["dark", "light"] : ["light", "dark"];
+    problem({
+      rule: "missing",
+      at: at(inLight ?? inDark),
+      message:
+        `\`${token}\` is in the ${have} block but not in the ${lack} block. Declare it in both, ` +
+        `even when the colour is the same, so each theme says what it means`,
+    });
+  }
+
+  // ── The pairs, on the values that ship in each theme ──
+  // A token missing from a theme was reported above, so its pairs are skipped here, not repeated.
+  const unmeasurable = new Set<string>();
+  const cannotMeasure = (mode: string, token: string, decl: TokenDecl): void => {
+    if (unmeasurable.has(`${mode}:${token}`)) return;
+    unmeasurable.add(`${mode}:${token}`);
+    problem({
+      rule: "floor",
+      at: at(decl),
+      message:
+        `${mode}: cannot measure ${token} (${decl.value}), because it is not a hex colour. ` +
+        `Keep the values hex, or teach this check the new notation; ` +
+        `do not let a pair go unmeasured.`,
+    });
+  };
+  const measure = (pairs: readonly TokenPair[], floor: number, why: string): void => {
+    for (const [background, foreground] of pairs) {
+      for (const [mode, tokens] of themes) {
+        const bg = tokens.get(background);
+        const fg = tokens.get(foreground);
+        if (bg === undefined || fg === undefined) continue;
+        const bgHex = normalizeHex(bg.value);
+        const fgHex = normalizeHex(fg.value);
+        if (bgHex === null || fgHex === null) {
+          if (bgHex === null) cannotMeasure(mode, background, bg);
+          if (fgHex === null) cannotMeasure(mode, foreground, fg);
+          continue;
+        }
+        const ratio = contrast(fgHex, bgHex);
+        if (ratio < floor) {
+          problem({
+            rule: "floor",
+            at: at(fg),
+            message:
+              `${mode}: ${foreground} (${fgHex}) on ${background} (${bgHex}) is ` +
+              `${ratio.toFixed(2)}:1, under the ${floor}:1 floor for ${why}`,
+          });
+        }
+      }
+    }
+  };
+  measure(textPairs, bundle.textFloor ?? 4.5, "text (WCAG 1.4.3)");
+  measure(nonTextPairs, bundle.nonTextFloor ?? 3, "a control or icon (WCAG 1.4.11)");
+
+  // ── The system fallback says what the dark block says ──
+  if (bundle.system === undefined) return;
+  const mirror = (decl: TokenDecl | undefined, message: string): void =>
+    problem({ rule: "mirror", at: at(decl), message });
+  if (system === null) {
+    mirror(
+      undefined,
+      `no \`${bundle.system}\` block for the system fallback. Without it a page that has ` +
+        `chosen no theme stays light on a dark system`,
+    );
+    return;
+  }
+  if (!system.within.every((within) => PREFERS_DARK.test(within))) {
+    mirror(
+      [...system.tokens.values()][0],
+      `\`${bundle.system}\` is not inside @media (prefers-color-scheme: dark), so it paints ` +
+        `the dark colours for everyone who has chosen no theme`,
+    );
+  }
+  for (const token of new Set([...dark.tokens.keys(), ...system.tokens.keys()])) {
+    const chosen = dark.tokens.get(token);
+    const followed = system.tokens.get(token);
+    if (chosen !== undefined && followed !== undefined) {
+      if (canonical(chosen.value) !== canonical(followed.value)) {
+        mirror(
+          followed,
+          `\`${token}\` is ${chosen.value} in the dark block but ${followed.value} in the system block`,
+        );
+      }
+    } else if (chosen !== undefined) {
+      mirror(chosen, `\`${token}\` is in the dark block but not in the system block`);
+    } else {
+      mirror(followed, `\`${token}\` is in the system block but not in the dark block`);
+    }
+  }
+}
+
+/**
+ * The plain-CSS gate: for each stylesheet, the contrast of every pair in both themes, a token
+ * both themes have, and a system fallback that matches the dark block. Returns what it found,
+ * the same report `checkContrast` returns, so `formatContrastReport` prints either and a repo
+ * can join the two (`report.problems.push(...other.problems)`) and fail CI once.
+ *
+ * ```ts
+ * const report = await checkTokenPairs([
+ *   { name: "site", css: "src/tokens.css", dark: ':root[data-theme="dark"]', textPairs: [["--ground", "--ink"]] },
+ * ]);
+ * console.log(formatContrastReport(report));
+ * ```
+ */
+export async function checkTokenPairs(
+  bundles: readonly TokenPairsBundle[],
+  options: CheckContrastOptions = {},
+): Promise<ContrastReport> {
+  const report: ContrastReport = { problems: [] };
+  for (const bundle of bundles) await checkTokenBundle(bundle, options, report);
+  return report;
 }

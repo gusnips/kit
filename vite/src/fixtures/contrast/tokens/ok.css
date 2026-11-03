@@ -1,0 +1,30 @@
+/* Flat colour blocks, written the way a plain-CSS app writes them. A {brace} in a comment is no block. */
+:root {
+  --ground: #ffffff;
+  --ink: #1a1a1a;
+  --muted: #555555;
+  --line: #767676;
+  --accent: #0b5cad;
+  --accent-ink: #fff;
+  --radius: 8px;
+}
+
+:root[data-theme="dark"] {
+  --ground: #121212;
+  --ink: #f2f2f2;
+  --muted: #b3b3b3;
+  --line: #8a8a8a;
+  --accent: #7ab7ff;
+  --accent-ink: #0a1a2b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --ground: #121212;
+    --ink: #f2f2f2;
+    --muted: #b3b3b3;
+    --line: #8a8a8a;
+    --accent: #7ab7ff;
+    --accent-ink: #0a1a2b;
+  }
+}

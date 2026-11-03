@@ -370,7 +370,8 @@ process.exit(report.problems.some((p) => p.level === "error") ? 1 : 0);
 ```
 
 The tokens package measures the placeholder colours it ships. This measures yours: it compiles
-your entry with the real Tailwind CLI and reads the CSS that comes back.
+your entry with the real Tailwind CLI and reads the CSS that comes back. No Tailwind? The next
+section reads plain CSS custom properties instead.
 
 | It fails when                                                      | Because the reader gets                                   |
 | ------------------------------------------------------------------ | --------------------------------------------------------- |
@@ -388,6 +389,108 @@ not have, or a class built dynamically that no scan can see.
 
 Pass `allow: [/^bg-brand-/]` for the classes a repo means. Floors take no allow list: a
 measured ratio is not a judgement call.
+
+## Check your contrast without Tailwind
+
+If your colours are plain CSS custom properties, there is no `@theme` to compile. Name the file,
+the selector of the dark block, and the pairs that must stay readable:
+
+```ts
+// scripts/check-contrast.ts
+import { checkTokenPairs, formatContrastReport } from "@gusnips/vite/contrast";
+
+const report = await checkTokenPairs([
+  {
+    name: "site",
+    css: "src/tokens.css",
+    dark: ':root[data-theme="dark"]',
+    textPairs: [["--ground", "--ink"]],
+  },
+]);
+
+console.log(formatContrastReport(report));
+process.exit(report.problems.some((p) => p.level === "error") ? 1 : 0);
+```
+
+It reads the colours in `:root { … }` as the light theme and the colours in your dark block as the
+dark one. If `--ink` on `--ground` is under 4.5:1 in either, it prints the line and exits 1:
+
+```
+site
+  ✖ floor: src/tokens.css:8 dark: --ink (#3a3a3a) on --ground (#121212) is 1.65:1, under the 4.5:1 floor for text (WCAG 1.4.3)
+✖ contrast: 1 error(s)
+```
+
+Nothing is compiled, so it needs no Tailwind and no other peer. It returns the same report as
+`checkContrast`, so the formatter is the same, and you can join the two before you exit:
+`report.problems.push(...other.problems)`.
+
+| It fails when                                                           | Because the reader gets                          |
+| ----------------------------------------------------------------------- | ------------------------------------------------ |
+| a pair is under its floor in the light or the dark theme                | text or a border some people cannot see          |
+| a colour is in one theme and not the other                              | one mode keeping, or lacking, a colour           |
+| a pair names a token that no block declares                             | a typo that looks like a pair that passes        |
+| a pair holds a colour that is not hex                                   | a floor nobody is keeping                        |
+| the system block differs from the dark block, or is not in the `@media` | a page with no saved choice that looks different |
+
+`textPairs` are held to 4.5:1 and `nonTextPairs` (borders, focus rings, icons) to 3:1. Change
+them with `textFloor` and `nonTextFloor`. A pair is `[background, foreground]`; the ratio is the
+same either way round, so the order only decides how the message reads. Write the names as the CSS
+does, with the `--`. The light block is `:root` unless you set `light`.
+
+**The system block.** A page that has not chosen a theme follows the system, so many apps write
+the dark colours twice: once for the chosen theme and once for everyone else.
+
+```css
+:root {
+  --ground: #ffffff;
+  --ink: #1a1a1a;
+}
+
+:root[data-theme="dark"] {
+  --ground: #121212;
+  --ink: #f2f2f2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --ground: #121212;
+    --ink: #f2f2f2;
+  }
+}
+```
+
+Pass `system: ":root:not([data-theme])"` and the check holds the second block to the first: the
+same tokens, the same colours (`#FFF` and `#ffffff` are the same colour), and inside
+`@media (prefers-color-scheme: dark)`. Either dark block can sit inside `@media screen { … }`.
+
+**Your own checks.** `loadTokenThemes` hands back the two palettes as hex, with the same file and
+selectors:
+
+```ts
+import { loadTokenThemes } from "@gusnips/vite/contrast";
+
+const { light, dark } = await loadTokenThemes({
+  css: "src/tokens.css",
+  dark: ':root[data-theme="dark"]',
+});
+light.get("--ground"); // "#ffffff"
+```
+
+Use it for what only your app knows: that the browser's toolbar colour is the page's ground in
+each theme, for example. It throws, and says what is missing, if the file or a block is not there.
+
+**What it does not read.** It reads text, not CSS, and there is no CSS parser behind it.
+
+- Only hex colours (`#fff` or `#ffffff`) are measured. A token in a pair that holds `rgb()`,
+  `oklch()` or `var()` fails as one it cannot measure. Tokens no pair uses, like `--radius`, are
+  left alone.
+- A block is found by its selector text, inside any `@media`, and must hold declarations only. A
+  block with another rule inside it (nested CSS) is not read, and the check says it found no
+  block.
+- A media query is read, not run. A `@media print` block with your dark selector counts as that
+  selector. If one selector is written twice, the later token wins, as it does in CSS.
+- Light and dark need different selectors.
 
 ## The vite preset
 

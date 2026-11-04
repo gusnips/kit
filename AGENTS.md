@@ -103,7 +103,8 @@ reading `bakeHead` should not load it.
 
 `@gusnips/vite/contrast` is the fourth subpath no peer forced (the third, `@gusnips/http/retry`,
 is below). It shells the Tailwind CLI over the adopter's own entry, so `tailwindcss` and
-`@tailwindcss/cli` are optional peers reachable only from there.
+`@tailwindcss/cli` are optional peers reachable only from there. `checkTokenPairs`, its reading of
+plain CSS custom properties, compiles nothing and needs neither.
 
 `@gusnips/http/retry` is the third. Invariant 8's rule moved there from `@gusnips/react` so an SDK
 with no React in it can follow it, and every server imports the main entry for the envelope and

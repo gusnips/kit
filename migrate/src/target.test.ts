@@ -27,6 +27,24 @@ describe("describeTarget", () => {
     );
   });
 
+  it("lets a host and port in the query string win over the authority, as pg does", () => {
+    // pg-connection-string dials remote.example:6543 for this URL, so the guard must say so.
+    expect(
+      describeTarget("postgresql://127.0.0.1:5432/local?host=remote.example&port=6543"),
+    ).toEqual({
+      host: "remote.example",
+      port: 6543,
+      database: "local",
+    });
+    expect(describeTarget("postgresql://u:p@db.example.com/app?port=6543")?.port).toBe(6543);
+  });
+
+  it("decodes a percent-encoded socket directory in the authority", () => {
+    expect(describeTarget("postgresql://%2Fvar%2Frun%2Fpostgresql/app")?.host).toBe(
+      "/var/run/postgresql",
+    );
+  });
+
   it("strips the brackets from an IPv6 host", () => {
     // `new URL(...).hostname` is "[::1]"; compared as-is, this machine reads as remote.
     expect(describeTarget("postgresql://u:p@[::1]:5432/app")?.host).toBe("::1");
@@ -55,6 +73,14 @@ describe("confirmationReason", () => {
     expect(at("postgresql://p@db.example.com:5432/app")).toBe('remote host "db.example.com"');
     expect(at("postgresql://p@127.0.0.1:5434/app", 5434)).toBe("the SSH tunnel on port 5434");
     expect(at("postgresql://p@127.0.0.1:5434/app")).toBeNull();
+  });
+
+  it("asks when a query-string host points a loopback URL somewhere else", () => {
+    expect(at("postgresql://p@127.0.0.1:5432/app?host=remote.example")).toBe(
+      'remote host "remote.example"',
+    );
+    expect(at("postgresql://p@db.example.com/app?host=127.0.0.1")).toBeNull();
+    expect(at("postgresql://p@127.0.0.1/app?port=5434", 5434)).toBe("the SSH tunnel on port 5434");
   });
 });
 

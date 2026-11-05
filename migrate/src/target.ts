@@ -29,15 +29,20 @@ const LOCAL_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "::1
  *
  * The brackets come off an IPv6 host: `new URL("postgresql://[::1]/db").hostname` is `"[::1]"`,
  * and one runner compared that against `"::1"` and so treated its own machine as remote.
+ *
+ * The query string wins over the authority, the way pg-connection-string reads it:
+ * `postgresql://127.0.0.1/app?host=db.example.com&port=6543` connects to db.example.com:6543.
+ * Reading the authority first called that URL local while pg dialled the remote host.
  */
 export function describeTarget(databaseUrl: string): Target | null {
   try {
     const url = new URL(databaseUrl);
     return {
-      // `postgresql:///app?host=/var/run/postgresql` is a form pg reads too: no host in the
-      // authority, the real one in the query string.
-      host: (url.hostname || url.searchParams.get("host") || "").replace(/^\[|\]$/g, ""),
-      port: Number(url.port || url.searchParams.get("port")) || 5432,
+      host: (url.searchParams.get("host") || decodeURIComponent(url.hostname)).replace(
+        /^\[|\]$/g,
+        "",
+      ),
+      port: Number(url.searchParams.get("port") || url.port) || 5432,
       database: decodeURIComponent(url.pathname.replace(/^\//, "")) || "postgres",
     };
   } catch {

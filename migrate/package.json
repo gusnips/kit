@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/migrate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Plain SQL migrations for Postgres, one transaction per file, plus a type generator and a Supabase stand-in for CI.",
   "type": "module",
   "license": "MIT",

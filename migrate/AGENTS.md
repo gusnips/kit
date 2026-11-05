@@ -110,6 +110,12 @@ both Bun 1.3.8 and Node 22. It is the driver's, not the runner's, and `describeT
 brackets is still right for the guard. Someone on IPv6 loopback writes `localhost` or passes the
 host outside the URL.
 
+The guard must name the host `pg` will dial, and `pg-connection-string` lets a `host=` or `port=`
+in the query string win over the authority. `postgresql://127.0.0.1/app?host=db.example.com` dials
+db.example.com, and `describeTarget` read the authority first and called it local until 0.1.1.
+`target.test.ts` holds the URL shapes; re-measure against the installed `pg-connection-string`
+before changing the order.
+
 # What the build measured
 
 - **Every donor chain replayed from an empty Postgres 18.** Eleven chains, 313 files, each run as

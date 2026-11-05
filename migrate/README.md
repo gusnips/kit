@@ -138,7 +138,8 @@ by a test.
 
 A laptop's `.env` often reaches production, sometimes through an SSH tunnel on a local port. So a
 run that would apply something refuses without `--yes` when the host is not this machine, or when
-the port is `tunnelPort`. A run with nothing to apply never asks.
+the port is `tunnelPort`. A run with nothing to apply never asks. The host and port are the ones
+`pg` dials, so a `?host=` or `?port=` in the URL counts over the part before the slash.
 
 Seed and smoke scripts can use the same rule:
 

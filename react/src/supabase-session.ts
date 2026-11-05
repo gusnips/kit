@@ -17,6 +17,11 @@ export interface SupabaseSessionAuth {
   getSession(): Promise<SupabaseSessionResult>;
   refreshSession(): Promise<SupabaseSessionResult & { error: unknown }>;
   signOut(options?: SignOut): Promise<{ error: unknown }>;
+  /** supabase-js always has it. {@link signOutEvenOffline} listens with it so it never sends a
+   *  second `SIGNED_OUT`; without it, that cleanup runs every time. */
+  onAuthStateChange?(callback: (event: string) => void): {
+    data: { subscription: { unsubscribe(): void } };
+  };
 }
 
 /**
@@ -185,18 +190,38 @@ function localStorageOrMemory(): SupportedStorage {
  * of waiting for the event.
  */
 export async function signOutEvenOffline(
-  auth: Pick<SupabaseSessionAuth, "signOut">,
+  auth: Pick<SupabaseSessionAuth, "signOut" | "onAuthStateChange">,
   { storage, storageKey }: SupabaseSessionStorage,
 ): Promise<{ error: unknown }> {
-  const { error } = await withinSignOutDeadline(auth.signOut({ scope: "local" }));
-  if (error == null) return { error: null };
+  // From 2.119.0 on, auth-js signs this device out by itself when a local sign-out meets a refresh
+  // that could not reach auth, and sends SIGNED_OUT when its backoff ends. The cleanup below would
+  // send it a second time, so it runs only if auth-js finished without sending one.
+  let announced = false;
+  const listening = auth.onAuthStateChange?.((event) => {
+    if (event === "SIGNED_OUT") announced = true;
+  });
+  const done = () => listening?.data.subscription.unsubscribe();
+  const first = auth.signOut({ scope: "local" }).catch((thrown: unknown) => ({ error: thrown }));
+  const { error } = await withinSignOutDeadline(first);
+  if (error == null) {
+    done();
+    return { error: null };
+  }
   // From 2.110.2 on, auth-js has already removed the session when only `/logout` failed, and has
   // already sent SIGNED_OUT. Going on would send it a second time.
-  if ((await storage.getItem(storageKey)) === null) return { error };
+  if ((await storage.getItem(storageKey)) === null) {
+    done();
+    return { error };
+  }
   await storage.removeItem(storageKey);
-  // Not awaited: inside auth-js it can wait behind the first call, which may still be in its
-  // refresh backoff. The session is already out of storage, and storage is what a reload reads.
-  void auth.signOut({ scope: "local" }).catch(() => {});
+  // Not awaited: the first call may still be in auth-js's refresh backoff, and a second one would
+  // wait behind it anyway. The session is already out of storage, and storage is what a reload reads.
+  void first
+    .then(async () => {
+      if (!announced) await auth.signOut({ scope: "local" });
+    })
+    .catch(() => {})
+    .finally(done);
   return { error };
 }
 

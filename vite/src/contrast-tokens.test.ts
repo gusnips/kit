@@ -24,10 +24,11 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures/contrast/tokens");
 
+const DARK = ':root[data-theme="dark"]';
 const bundle: TokenPairsBundle = {
   name: "site",
   css: "tokens.css",
-  dark: ':root[data-theme="dark"]',
+  dark: DARK,
   system: ":root:not([data-theme])",
   textPairs: [
     ["--ground", "--ink"],
@@ -232,10 +233,46 @@ describe("checkTokenPairs", () => {
   });
 });
 
+describe("checkTokenPairs, light only", () => {
+  /** The fixture's light block alone: a stylesheet for a product with no dark theme. */
+  const lightOnly = async (): Promise<string> =>
+    (await fixture("ok.css")).split(':root[data-theme="dark"]')[0]!;
+  const light = { dark: undefined, system: undefined };
+
+  it("measures each pair once, in the light block, with no dark twin asked for", async () => {
+    const report = await check(await lightOnly(), light);
+    expect(report.problems).toEqual([]);
+  });
+
+  it("still fails a pair under its floor, as light", async () => {
+    const css = change(await lightOnly(), "--muted: #555555", "--muted: #bbbbbb");
+    const found = only((await check(css, light)).problems);
+    expect(found).toMatchObject({ rule: "floor" });
+    expect(found.message).toMatch(/^light: --muted \(#bbbbbb\) on --ground/);
+  });
+
+  it("reports a pair that names a token the light block lacks", async () => {
+    const found = only(
+      (await check(await lightOnly(), { ...light, textPairs: [["--ground", "--nope"]] })).problems,
+    );
+    expect(found).toMatchObject({ rule: "missing" });
+    expect(found.message).toContain("`--nope`, which the light block does not declare");
+  });
+
+  it("refuses a system block with no dark block to repeat", async () => {
+    const found = only(
+      (await check(await lightOnly(), { dark: undefined, system: ":root:not([data-theme])" }))
+        .problems,
+    );
+    expect(found).toMatchObject({ rule: "load" });
+    expect(found.message).toContain("names no dark block");
+  });
+});
+
 describe("loadTokenThemes", () => {
   it("hands back both palettes as hex, so an adopter can add a check of its own", async () => {
     const { light, dark } = await loadTokenThemes(
-      { css: "ok.css", dark: bundle.dark },
+      { css: "ok.css", dark: DARK },
       { root: fixtures },
     );
     expect(light.get("--ground")).toBe("#ffffff");
@@ -250,7 +287,7 @@ describe("loadTokenThemes", () => {
       loadTokenThemes({ css: "ok.css", dark: '[data-theme="night"]' }, { root: fixtures }),
     ).rejects.toThrow('no `[data-theme="night"]` block');
     await expect(
-      loadTokenThemes({ css: "nope.css", dark: bundle.dark }, { root: fixtures }),
+      loadTokenThemes({ css: "nope.css", dark: DARK }, { root: fixtures }),
     ).rejects.toThrow("nope.css could not be read");
   });
 });

@@ -413,7 +413,8 @@ process.exit(report.problems.some((p) => p.level === "error") ? 1 : 0);
 ```
 
 It reads the colours in `:root { … }` as the light theme and the colours in your dark block as the
-dark one. If `--ink` on `--ground` is under 4.5:1 in either, it prints the line and exits 1:
+dark one. A product with no dark theme leaves `dark` off: each pair is then measured once, in the
+light block, and no token needs a dark twin. If `--ink` on `--ground` is under 4.5:1 in either, it prints the line and exits 1:
 
 ```
 site

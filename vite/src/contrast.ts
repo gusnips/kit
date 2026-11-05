@@ -543,12 +543,16 @@ export interface TokenPairsBundle {
   css: string;
   /** The selector of the light block. Default `":root"`. It must differ from `dark`. */
   light?: string;
-  /** The selector of the dark block: `':root[data-theme="dark"]'`. */
-  dark: string;
+  /**
+   * The selector of the dark block: `':root[data-theme="dark"]'`. Leave it off for a light-only
+   * stylesheet: each pair is then measured once, and no token needs a dark twin.
+   */
+  dark?: string;
   /**
    * The selector of the system fallback: the dark colours again, for a page that has chosen no
    * theme, inside `@media (prefers-color-scheme: dark)`: `":root:not([data-theme])"`. It must
-   * hold exactly the dark block's tokens and values. Leave it off when there is none.
+   * hold exactly the dark block's tokens and values. Leave it off when there is none, and always
+   * when there is no `dark` block.
    */
   system?: string;
   /** Pairs read as text. Held to `textFloor`. */
@@ -587,7 +591,8 @@ interface TokenBlock {
 
 interface TokenBlocks {
   light: TokenBlock;
-  dark: TokenBlock;
+  /** `null` for a light-only bundle, one that names no dark block. */
+  dark: TokenBlock | null;
   /** `null` when the bundle names no system block, or names one that is not in the file. */
   system: TokenBlock | null;
 }
@@ -676,6 +681,15 @@ async function readTokenBlocks(
     return block;
   };
   const lightSelector = bundle.light ?? ":root";
+  if (bundle.dark === undefined) {
+    if (bundle.system !== undefined) {
+      throw new Error(
+        `a system block repeats the dark colours, and this bundle names no dark block. Name the ` +
+          `dark block, or leave \`system\` off for a light-only stylesheet`,
+      );
+    }
+    return { light: required("light", lightSelector), dark: null, system: null };
+  }
   if (selectorOf(lightSelector) === selectorOf(bundle.dark)) {
     throw new Error(`the light and dark selectors are both \`${lightSelector}\`; they must differ`);
   }
@@ -708,10 +722,12 @@ function hexTokens(tokens: ReadonlyMap<string, TokenDecl>): Map<string, string> 
  * Throws, saying what is missing, when the file or one of the two blocks is not there.
  */
 export async function loadTokenThemes(
-  bundle: Pick<TokenPairsBundle, "css" | "light" | "dark">,
+  bundle: Pick<TokenPairsBundle, "css" | "light"> & { dark: string },
   options: CheckContrastOptions = {},
 ): Promise<TokenThemes> {
   const { light, dark } = await readTokenBlocks(bundle, options.root ?? process.cwd());
+  // Unreachable: a bundle that names a dark block either has one or throws above.
+  if (dark === null) throw new Error(`${bundle.css} has no \`${bundle.dark}\` block`);
   return { light: hexTokens(light.tokens), dark: hexTokens(dark.tokens) };
 }
 
@@ -734,21 +750,31 @@ async function checkTokenBundle(
     return;
   }
   const { light, dark, system } = blocks;
-  const themes: Array<[mode: string, tokens: Map<string, TokenDecl>]> = [
-    ["light", light.tokens],
-    ["dark", dark.tokens],
-  ];
+  const themes: Array<[mode: string, tokens: Map<string, TokenDecl>]> = [["light", light.tokens]];
+  if (dark !== null) themes.push(["dark", dark.tokens]);
   const textPairs = bundle.textPairs ?? [];
   const nonTextPairs = bundle.nonTextPairs ?? [];
 
   // ── Every colour has both themes, and every pair names a real token ──
+  // A light-only bundle has one theme, so only the pairs' names are checked against it.
   const wanted = new Set([
-    ...hexTokens(light.tokens).keys(),
-    ...hexTokens(dark.tokens).keys(),
+    ...(dark === null ? [] : [...hexTokens(light.tokens).keys(), ...hexTokens(dark.tokens).keys()]),
     ...[...textPairs, ...nonTextPairs].flat(),
   ]);
   for (const token of wanted) {
     const inLight = light.tokens.get(token);
+    if (dark === null) {
+      if (inLight === undefined) {
+        problem({
+          rule: "missing",
+          at: bundle.css,
+          message:
+            `a pair names \`${token}\`, which the light block does not declare` +
+            (token.startsWith("--") ? "" : ". Custom property names start with --"),
+        });
+      }
+      continue;
+    }
     const inDark = dark.tokens.get(token);
     if (inLight !== undefined && inDark !== undefined) continue;
     if (inLight === undefined && inDark === undefined) {
@@ -816,7 +842,7 @@ async function checkTokenBundle(
   measure(nonTextPairs, bundle.nonTextFloor ?? 3, "a control or icon (WCAG 1.4.11)");
 
   // ── The system fallback says what the dark block says ──
-  if (bundle.system === undefined) return;
+  if (bundle.system === undefined || dark === null) return;
   const mirror = (decl: TokenDecl | undefined, message: string): void =>
     problem({ rule: "mirror", at: at(decl), message });
   if (system === null) {

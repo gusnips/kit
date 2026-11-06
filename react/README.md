@@ -703,12 +703,37 @@ export const oauthApi = createOAuthConsoleApi(api, "/auth/oauth");
 ```
 
 That is both pages' calls to the server's `oauthConsoleRoutes`, mounted at `/auth/oauth` behind
-your sign-in. `api` is your `createApiClient` client, or any object with its `get` and `post`.
+your sign-in. `api` is your `createApiClient` client, or any object with its typed `get` and `post`
+methods, including their `RequestOptions` argument.
+
+Both hooks require `scope`, captured from your app's identity store:
+
+```ts
+import type { OAuthScope } from "@gusnips/react/oauth";
+
+const scope: OAuthScope = {
+  key: ["identity", accountId, workspaceId, generation],
+  isCurrent: () => identityStore.getState().generation === generation,
+};
+```
+
+Those ids, `generation` and `identityStore` belong to your app. Read them from the same snapshot.
+Advance the generation whenever the account or workspace changes, including sign-out and signing
+back into the same account. Do not use an access token: refreshing a token is not a new identity.
+`isCurrent` compares that captured generation with the live store, not another render's copy.
+
+Query keys start with `scope.key`, followed by `"@gusnips/react/oauth"`, the hook kind and the
+request without its leading `?` or the device code's eight uppercase letters. Equal requests can
+share data within one scope, never across identities. Keep your app's normal query cancellation
+and cache clearing at identity boundaries; clearing a cache alone does not stop a running write.
+
+This required argument is a breaking API change. It needs a new React 0.x minor and a paired Vite
+minor before publication. Existing callers must pass a scope when adopting that release.
 
 ```tsx
 import { useConsentRequest } from "@gusnips/react/oauth";
 
-const consent = useConsentRequest(oauthApi.consent, useLocation().search);
+const consent = useConsentRequest(oauthApi.consent, useLocation().search, scope);
 
 if (consent.state.status === "ready")
   return (
@@ -718,9 +743,13 @@ if (consent.state.status === "ready")
   );
 ```
 
-If your routes are your own, pass your own two calls instead: `describe(query)` and
-`approve(query, choice)`. The choice is anything your page adds, such as a workspace, and it reaches
-the server's approver. With no choice, call `approve()`.
+If your routes are your own, pass your own two calls instead: `describe(query, options)` and
+`approve(query, choice, options)`. `options` is `RequestOptions` from `@gusnips/react`. Forward it
+to your HTTP client, including its `signal`. Reads receive TanStack Query's cancellation signal;
+writes receive a signal owned by the initiating operation. For an identity-aware adapter, capture
+the same account and workspace used in `scope` when building the adapter. Do not read a different
+identity's headers at dispatch time. The choice is anything your page adds, such as a workspace,
+and it reaches the server's approver. With no choice, call `approve()`.
 
 When your server adds fields to the view, type them after the choice:
 `createOAuthConsoleApi<string, { spaces: Space[] }>(api, "/auth/oauth")`, and
@@ -741,10 +770,22 @@ With your own calls, it is `ConsentApi<Choice, { spaces: Space[] }>`.
 for a second press. Approve sends the browser on with `window.location.assign`, which also opens
 an app's own scheme such as `cursor://`.
 
+A decision captures its API calls, request and identity when pressed. A changed scope, request,
+code or unmounted page invalidates it. Late answers reject with `OAuthOperationChangedError`
+before successful data can enter the mutation cache. Consent checks again before redirecting.
+Transport is aborted on code/request changes or cleanup, but the generation check still applies
+if an adapter ignores cancellation. Aborting cannot undo a decision the server already made.
+Show request errors beside the button with `approveError` or `decideError`, and let the person
+press again. A stale decision does not become the new page's result or error.
+
+Both hooks set `retry: false` and `refetchOnWindowFocus: false` for reads, even if your client's
+defaults say otherwise. Writes also set `retry: false` and `networkMode: "always"`: an offline
+press tries once and can fail, but it is never queued to run when the connection returns.
+
 ```tsx
 import { useDeviceApproval, useDeviceCodeField } from "@gusnips/react/oauth";
 
-const device = useDeviceApproval(oauthApi.device, useLocation().search);
+const device = useDeviceApproval(oauthApi.device, useLocation().search, scope);
 const field = useDeviceCodeField(device);
 
 <label htmlFor={field.inputProps.id}>Code</label>
@@ -770,6 +811,10 @@ page stays decided: it never asks the server again, because the server no longer
 and asking on the next focus would tell someone who just said yes that their code is wrong.
 
 `approve(choice)` sends a choice with the yes, as on the consent page; `deny()` sends none.
+For your own routes, the calls are `describe(code, options)` and
+`decide(code, decision, choice, options)`, with the same `RequestOptions` forwarding as consent.
+A new link's code replaces the field; editing a code starts a new operation. Approved and denied
+states last only for that code in that scope.
 `pending` is `"approve"` or `"deny"` from the press until the server answers, so the spinner goes
 on the button that was pressed.
 

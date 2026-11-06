@@ -1,6 +1,14 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useId, useState, type ChangeEvent } from "react";
-import type { ApiClient } from "./api-client.ts";
+import { hashKey, useMutation, useQuery, type QueryKey } from "@tanstack/react-query";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+} from "react";
+import type { ApiClient, RequestOptions } from "./api-client.ts";
 
 /**
  * The two pages behind an agent's sign-in: the consent page, where Claude or ChatGPT sends a
@@ -54,11 +62,87 @@ export type DeviceView<Extra extends object = object> = Extra & {
   expiresAt: string;
 };
 
+/** Capture this from your app's identity store on each account or workspace generation. */
+export interface OAuthScope {
+  /** Query-key prefix, including account, workspace and the identity generation. Never a token. */
+  readonly key: QueryKey;
+  /** Compare the captured generation with the live store, even before React renders again. */
+  isCurrent(): boolean;
+}
+
+/** A decision outlived its account, request or page. Aborting does not undo a server-side decision. */
+export class OAuthOperationChangedError extends Error {
+  constructor() {
+    super(
+      "The account, sign-in request or page changed before the decision finished. Check connected apps in the account you used before trying again.",
+    );
+    this.name = "OAuthOperationChangedError";
+  }
+}
+
+interface OAuthOperation {
+  identity: string;
+  signal: AbortSignal;
+  isCurrent(): boolean;
+  release(): void;
+}
+
+function assertCurrent(operation: OAuthOperation): void {
+  if (!operation.isCurrent()) throw new OAuthOperationChangedError();
+}
+
+function createOperationLifetime(identity: string) {
+  let mounted = false;
+  let generation = 0;
+  const controllers = new Set<AbortController>();
+  return {
+    identity,
+    invalidate() {
+      generation++;
+      for (const controller of controllers) controller.abort();
+      controllers.clear();
+    },
+    mount() {
+      mounted = true;
+      return () => {
+        mounted = false;
+        this.invalidate();
+      };
+    },
+    capture(isCurrent: () => boolean): OAuthOperation {
+      const started = generation;
+      const controller = new AbortController();
+      controllers.add(controller);
+      return {
+        identity,
+        signal: controller.signal,
+        isCurrent: () => mounted && started === generation && isCurrent(),
+        release: () => controllers.delete(controller),
+      };
+    },
+  };
+}
+
+/** Both pages reject late answers, even when the adapter ignores abort or the cache was cleared. */
+function useOAuthOperation(scope: OAuthScope, kind: "consent" | "device", input: string) {
+  const key = [...scope.key, "@gusnips/react/oauth", kind, input];
+  const identity = hashKey(key);
+  const lifetime = useMemo(() => createOperationLifetime(identity), [identity]);
+  // Invalidate by the commit, before passive cleanup can leave a late redirect window.
+  // Layout effects work on native too and do not run during SSR. StrictMode can mount again.
+  useLayoutEffect(() => lifetime.mount(), [lifetime]);
+  return { key, lifetime, capture: () => lifetime.capture(() => scope.isCurrent()) };
+}
+
 export interface ConsentApi<Choice = void, Extra extends object = object> {
-  /** Your API's call to the server's `describe`, with the query string as it came. */
-  describe(query: string): Promise<ConsentView<Extra> | OAuthRefusal>;
+  /** Forward `options`, including its signal, to your HTTP client. */
+  describe(query: string, options?: RequestOptions): Promise<ConsentView<Extra> | OAuthRefusal>;
   /** Your API's call to `approve`. `choice` is anything your page adds, such as a workspace. */
-  approve(query: string, choice: Choice): Promise<{ ok: true; redirectTo: string } | OAuthRefusal>;
+  approve(
+    query: string,
+    choice: Choice,
+    options?: RequestOptions,
+  ): Promise<{ ok: true; redirectTo: string } | OAuthRefusal>;
 }
 
 export type ConsentState<Extra extends object = object> =
@@ -79,29 +163,59 @@ export interface ConsentRequest<Choice = void, Extra extends object = object> {
 }
 
 /**
- *     const consent = useConsentRequest(api.oauth, useLocation().search);
+ *     const consent = useConsentRequest(api.oauth, useLocation().search, scope);
  *     if (consent.state.status === "ready") ... consent.approve(workspaceId)
  */
 export function useConsentRequest<Choice = void, Extra extends object = object>(
   api: ConsentApi<Choice, Extra>,
   search: string,
+  scope: OAuthScope,
 ): ConsentRequest<Choice, Extra> {
   const query = search.replace(/^\?/, "");
+  const { key, lifetime, capture } = useOAuthOperation(scope, "consent", query);
   const request = useQuery({
-    queryKey: ["@gusnips/react/oauth", "consent", query],
-    queryFn: () => api.describe(query),
+    queryKey: key,
+    queryFn: ({ signal }) => api.describe(query, { signal }),
+    // A previous description is never a safe stand-in for this approval target.
+    placeholderData: () => undefined,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
   const approval = useMutation({
-    mutationFn: (choice: Choice) => api.approve(query, choice),
-    onSuccess: (answer) => {
-      if (answer.ok) window.location.assign(answer.redirectTo);
+    mutationFn: async (pressed: {
+      api: ConsentApi<Choice, Extra>;
+      query: string;
+      choice: Choice;
+      operation: OAuthOperation;
+    }) => {
+      const { api, query, choice, operation } = pressed;
+      try {
+        assertCurrent(operation);
+        const answer = await api.approve(query, choice, { signal: operation.signal });
+        // Before returning: stale success data must never enter the mutation cache.
+        assertCurrent(operation);
+        return answer;
+      } finally {
+        operation.release();
+      }
     },
+    onSettled: (answer, error, { operation }) => {
+      // Global success and settlement callbacks may await an identity change. Check last.
+      if (error !== null) return;
+      assertCurrent(operation);
+      if (answer?.ok) window.location.assign(answer.redirectTo);
+    },
+    retry: false,
+    networkMode: "always",
   });
+  const currentApproval =
+    approval.variables?.operation.identity === lifetime.identity &&
+    approval.variables.operation.isCurrent();
 
   // A refusal from approve (the request went stale between the two calls) outranks the view.
   const answer = request.data;
-  const refusal =
-    approval.data?.ok === false ? approval.data : answer?.ok === false ? answer : null;
+  let refusal = answer?.ok === false ? answer : null;
+  if (currentApproval && approval.data?.ok === false) refusal = approval.data;
   let state: ConsentState<Extra>;
   if (refusal) state = { status: "refused", refusal };
   else if (answer?.ok === true) state = { status: "ready", view: answer };
@@ -111,20 +225,21 @@ export function useConsentRequest<Choice = void, Extra extends object = object>(
 
   return {
     state,
-    approve: (choice) => approval.mutate(choice),
-    leaving: approval.isPending || approval.data?.ok === true,
-    approveError: approval.error,
+    approve: (choice) => approval.mutate({ api, query, choice, operation: capture() }),
+    leaving: currentApproval && (approval.isPending || approval.data?.ok === true),
+    approveError: currentApproval ? approval.error : null,
   };
 }
 
 export interface DeviceApi<Choice = void, Extra extends object = object> {
-  /** Your API's call to the server's `describeDevice`. */
-  describe(code: string): Promise<DeviceView<Extra> | OAuthRefusal>;
+  /** Forward `options`, including its signal, to your HTTP client. */
+  describe(code: string, options?: RequestOptions): Promise<DeviceView<Extra> | OAuthRefusal>;
   /** Your API's call to `decideDevice`. `choice` comes with a yes only, as on the consent page. */
   decide(
     code: string,
     decision: "approve" | "deny",
     choice?: Choice,
+    options?: RequestOptions,
   ): Promise<{ ok: true } | OAuthRefusal>;
 }
 
@@ -165,6 +280,9 @@ export interface DeviceApproval<Choice = void, Extra extends object = object> {
 const ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 const LENGTH = 8;
 
+// Private wiring between the approval and field hooks, without adding to the public page API.
+const deviceAddressWrites = new WeakMap<object, (code: string) => void>();
+
 /** Upper case, letters only, at most 8, with the dash after the fourth: what the field shows. */
 export function formatUserCode(input: string): string {
   const letters = input
@@ -175,7 +293,7 @@ export function formatUserCode(input: string): string {
 }
 
 /**
- *     const device = useDeviceApproval(api.device, useLocation().search);
+ *     const device = useDeviceApproval(api.device, useLocation().search, scope);
  *     <input value={device.code} onChange={(e) => device.setCode(e.target.value)} />
  *
  * The link the script prints carries `?code=`, so the field usually starts full.
@@ -183,28 +301,69 @@ export function formatUserCode(input: string): string {
 export function useDeviceApproval<Choice = void, Extra extends object = object>(
   api: DeviceApi<Choice, Extra>,
   search: string,
+  scope: OAuthScope,
 ): DeviceApproval<Choice, Extra> {
-  const [code, setTyped] = useState(() =>
-    formatUserCode(new URLSearchParams(search).get("code") ?? ""),
-  );
+  const fromLink = formatUserCode(new URLSearchParams(search).get("code") ?? "");
+  const [input, setInput] = useState<{
+    fromLink: string;
+    code: string;
+    ownAddress?: string;
+  }>({ fromLink, code: fromLink });
+  const recordAddressWrite = useCallback((ownAddress: string) => {
+    setInput((current) => ({ ...current, ownAddress }));
+  }, []);
+  // Only external links replace input. The field also writes the address while typing and
+  // clears it after a decision; neither write should replace input or invalidate the decision.
+  const code = input.fromLink === fromLink || input.ownAddress === fromLink ? input.code : fromLink;
+  if (input.fromLink !== fromLink) setInput({ fromLink, code });
   const letters = code.replace("-", "");
   const invalidLetter = [...letters].some((letter) => !ALPHABET.includes(letter));
   const complete = letters.length === LENGTH && !invalidLetter;
+  const { key, lifetime, capture } = useOAuthOperation(scope, "device", letters);
 
   const decision = useMutation({
-    mutationFn: (pressed: { decision: "approve" | "deny"; choice?: Choice }) =>
-      api.decide(letters, pressed.decision, pressed.choice),
+    mutationFn: async (pressed: {
+      api: DeviceApi<Choice, Extra>;
+      code: string;
+      decision: "approve" | "deny";
+      choice?: Choice;
+      operation: OAuthOperation;
+    }) => {
+      const { api, code, decision, choice, operation } = pressed;
+      try {
+        assertCurrent(operation);
+        const answer = await api.decide(code, decision, choice, { signal: operation.signal });
+        assertCurrent(operation);
+        return answer;
+      } finally {
+        operation.release();
+      }
+    },
+    onSettled: (_answer, error, { operation }) => {
+      if (error === null) assertCurrent(operation);
+    },
+    retry: false,
+    networkMode: "always",
   });
-  const decided = decision.isSuccess && decision.data.ok ? decision.variables.decision : undefined;
+  const currentDecision =
+    decision.variables?.operation.identity === lifetime.identity &&
+    decision.variables.operation.isCurrent();
+  const decided =
+    currentDecision && decision.isSuccess && decision.data.ok
+      ? decision.variables.decision
+      : undefined;
   const request = useQuery({
-    queryKey: ["@gusnips/react/oauth", "device", letters],
-    queryFn: () => api.describe(letters),
+    queryKey: key,
+    queryFn: ({ signal }) => api.describe(letters, { signal }),
     enabled: complete && decided === undefined,
+    placeholderData: () => undefined,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const answer = request.data;
-  const refusal =
-    decision.data?.ok === false ? decision.data : answer?.ok === false ? answer : null;
+  let refusal = answer?.ok === false ? answer : null;
+  if (currentDecision && decision.data?.ok === false) refusal = decision.data;
   let state: DeviceState<Extra>;
   if (decided !== undefined) state = { status: decided === "approve" ? "approved" : "denied" };
   else if (!complete) state = { status: "typing" };
@@ -214,20 +373,26 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
     state = { status: "failed", error: request.error, retry: () => void request.refetch() };
   else state = { status: "loading" };
 
-  return {
+  const device: DeviceApproval<Choice, Extra> = {
     state,
     code,
-    setCode: (input) => {
+    setCode: (value) => {
+      const next = formatUserCode(value);
+      if (next === code) return;
+      lifetime.invalidate();
       decision.reset();
-      setTyped(formatUserCode(input));
+      setInput((current) => ({ ...current, code: next }));
     },
     invalidLetter,
-    approve: (choice) => decision.mutate({ decision: "approve", choice }),
-    deny: () => decision.mutate({ decision: "deny" }),
-    deciding: decision.isPending,
-    pending: decision.isPending ? decision.variables.decision : null,
-    decideError: decision.error,
+    approve: (choice) =>
+      decision.mutate({ api, code: letters, decision: "approve", choice, operation: capture() }),
+    deny: () => decision.mutate({ api, code: letters, decision: "deny", operation: capture() }),
+    deciding: currentDecision && decision.isPending,
+    pending: currentDecision && decision.isPending ? decision.variables.decision : null,
+    decideError: currentDecision ? decision.error : null,
   };
+  deviceAddressWrites.set(device, recordAddressWrite);
+  return device;
 }
 
 export interface DeviceCodeField {
@@ -268,13 +433,16 @@ export function useDeviceCodeField<Choice, Extra extends object>(
   const statusId = `${id}-status`;
   const { status } = device.state;
   const inAddress = status === "approved" || status === "denied" ? "" : device.code;
+  const recordAddressWrite = deviceAddressWrites.get(device);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (inAddress) url.searchParams.set("code", inAddress);
     else url.searchParams.delete("code");
-    if (url.href !== window.location.href)
+    if (url.href !== window.location.href) {
+      recordAddressWrite?.(inAddress);
       window.history.replaceState(window.history.state, "", url);
-  }, [inAddress]);
+    }
+  }, [inAddress, recordAddressWrite]);
 
   return {
     inputProps: {
@@ -299,8 +467,8 @@ export type OAuthConsoleHttp = Pick<ApiClient, "get" | "post">;
 
 /**
  *     export const oauthApi = createOAuthConsoleApi(api, "/auth/oauth");
- *     useConsentRequest(oauthApi.consent, search);
- *     useDeviceApproval(oauthApi.device, search);
+ *     useConsentRequest(oauthApi.consent, search, scope);
+ *     useDeviceApproval(oauthApi.device, search, scope);
  *
  * Both pages' calls to the server's `oauthConsoleRoutes`, mounted at `basePath` behind your
  * sign-in. A choice travels as `choice`, which is where those routes hand it to your approver.
@@ -316,13 +484,15 @@ export function createOAuthConsoleApi<
 ): { consent: ConsentApi<Choice, ConsentExtra>; device: DeviceApi<Choice, DeviceExtra> } {
   return {
     consent: {
-      describe: (query) => http.get(`${basePath}/request?${query}`),
-      approve: (query, choice) => http.post(`${basePath}/approve`, { query, choice }),
+      describe: (query, options) => http.get(`${basePath}/request?${query}`, options),
+      approve: (query, choice, options) =>
+        http.post(`${basePath}/approve`, { query, choice }, options),
     },
     device: {
-      describe: (code) => http.get(`${basePath}/device?code=${encodeURIComponent(code)}`),
-      decide: (code, decision, choice) =>
-        http.post(`${basePath}/device`, { code, decision, choice }),
+      describe: (code, options) =>
+        http.get(`${basePath}/device?code=${encodeURIComponent(code)}`, options),
+      decide: (code, decision, choice, options) =>
+        http.post(`${basePath}/device`, { code, decision, choice }, options),
     },
   };
 }

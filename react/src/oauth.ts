@@ -1,5 +1,13 @@
 import { hashKey, useMutation, useQuery, type QueryKey } from "@tanstack/react-query";
-import { useEffect, useId, useMemo, useState, type ChangeEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+} from "react";
 import type { ApiClient, RequestOptions } from "./api-client.ts";
 
 /**
@@ -120,8 +128,9 @@ function useOAuthOperation(scope: OAuthScope, kind: "consent" | "device", input:
   const key = [...scope.key, "@gusnips/react/oauth", kind, input];
   const identity = hashKey(key);
   const lifetime = useMemo(() => createOperationLifetime(identity), [identity]);
-  // StrictMode mounts again after cleanup. Each press gets a fresh controller and generation.
-  useEffect(() => lifetime.mount(), [lifetime]);
+  // Invalidate by the commit, before passive cleanup can leave a late redirect window.
+  // Layout effects work on native too and do not run during SSR. StrictMode can mount again.
+  useLayoutEffect(() => lifetime.mount(), [lifetime]);
   return { key, lifetime, capture: () => lifetime.capture(() => scope.isCurrent()) };
 }
 
@@ -167,6 +176,8 @@ export function useConsentRequest<Choice = void, Extra extends object = object>(
   const request = useQuery({
     queryKey: key,
     queryFn: ({ signal }) => api.describe(query, { signal }),
+    // A previous description is never a safe stand-in for this approval target.
+    placeholderData: () => undefined,
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -188,10 +199,11 @@ export function useConsentRequest<Choice = void, Extra extends object = object>(
         operation.release();
       }
     },
-    onSuccess: (answer, { operation }) => {
-      // Cache callbacks run between mutationFn and this callback, and can change identity too.
+    onSettled: (answer, error, { operation }) => {
+      // Global success and settlement callbacks may await an identity change. Check last.
+      if (error !== null) return;
       assertCurrent(operation);
-      if (answer.ok) window.location.assign(answer.redirectTo);
+      if (answer?.ok) window.location.assign(answer.redirectTo);
     },
     retry: false,
     networkMode: "always",
@@ -268,6 +280,9 @@ export interface DeviceApproval<Choice = void, Extra extends object = object> {
 const ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 const LENGTH = 8;
 
+// Private wiring between the approval and field hooks, without adding to the public page API.
+const deviceAddressWrites = new WeakMap<object, (code: string) => void>();
+
 /** Upper case, letters only, at most 8, with the dash after the fourth: what the field shows. */
 export function formatUserCode(input: string): string {
   const letters = input
@@ -289,10 +304,18 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
   scope: OAuthScope,
 ): DeviceApproval<Choice, Extra> {
   const fromLink = formatUserCode(new URLSearchParams(search).get("code") ?? "");
-  const [input, setInput] = useState({ fromLink, code: fromLink });
-  // A new link replaces the code, but typing in the same link remains local to the field.
-  if (input.fromLink !== fromLink) setInput({ fromLink, code: fromLink });
-  const code = input.fromLink === fromLink ? input.code : fromLink;
+  const [input, setInput] = useState<{
+    fromLink: string;
+    code: string;
+    ownAddress?: string;
+  }>({ fromLink, code: fromLink });
+  const recordAddressWrite = useCallback((ownAddress: string) => {
+    setInput((current) => ({ ...current, ownAddress }));
+  }, []);
+  // Only external links replace input. The field also writes the address while typing and
+  // clears it after a decision; neither write should replace input or invalidate the decision.
+  const code = input.fromLink === fromLink || input.ownAddress === fromLink ? input.code : fromLink;
+  if (input.fromLink !== fromLink) setInput({ fromLink, code });
   const letters = code.replace("-", "");
   const invalidLetter = [...letters].some((letter) => !ALPHABET.includes(letter));
   const complete = letters.length === LENGTH && !invalidLetter;
@@ -316,7 +339,9 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
         operation.release();
       }
     },
-    onSuccess: (_answer, { operation }) => assertCurrent(operation),
+    onSettled: (_answer, error, { operation }) => {
+      if (error === null) assertCurrent(operation);
+    },
     retry: false,
     networkMode: "always",
   });
@@ -331,6 +356,7 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
     queryKey: key,
     queryFn: ({ signal }) => api.describe(letters, { signal }),
     enabled: complete && decided === undefined,
+    placeholderData: () => undefined,
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -347,7 +373,7 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
     state = { status: "failed", error: request.error, retry: () => void request.refetch() };
   else state = { status: "loading" };
 
-  return {
+  const device: DeviceApproval<Choice, Extra> = {
     state,
     code,
     setCode: (value) => {
@@ -355,7 +381,7 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
       if (next === code) return;
       lifetime.invalidate();
       decision.reset();
-      setInput({ fromLink, code: next });
+      setInput((current) => ({ ...current, code: next }));
     },
     invalidLetter,
     approve: (choice) =>
@@ -365,6 +391,8 @@ export function useDeviceApproval<Choice = void, Extra extends object = object>(
     pending: currentDecision && decision.isPending ? decision.variables.decision : null,
     decideError: currentDecision ? decision.error : null,
   };
+  deviceAddressWrites.set(device, recordAddressWrite);
+  return device;
 }
 
 export interface DeviceCodeField {
@@ -405,13 +433,16 @@ export function useDeviceCodeField<Choice, Extra extends object>(
   const statusId = `${id}-status`;
   const { status } = device.state;
   const inAddress = status === "approved" || status === "denied" ? "" : device.code;
+  const recordAddressWrite = deviceAddressWrites.get(device);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (inAddress) url.searchParams.set("code", inAddress);
     else url.searchParams.delete("code");
-    if (url.href !== window.location.href)
+    if (url.href !== window.location.href) {
+      recordAddressWrite?.(inAddress);
       window.history.replaceState(window.history.state, "", url);
-  }, [inAddress]);
+    }
+  }, [inAddress, recordAddressWrite]);
 
   return {
     inputProps: {

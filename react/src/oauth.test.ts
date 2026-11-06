@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 import {
   focusManager,
+  keepPreviousData,
   MutationCache,
   onlineManager,
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { act, createElement, StrictMode, type ChangeEvent } from "react";
+import { act, createElement, StrictMode, useLayoutEffect, type ChangeEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApiClient } from "./api-client.ts";
@@ -355,6 +356,47 @@ describe("useDeviceApproval with a choice", () => {
 const changeTo = (value: string) => ({ target: { value } }) as ChangeEvent<HTMLInputElement>;
 
 describe("useDeviceCodeField", () => {
+  it("keeps every typed character when the page reads its own URL writes", () => {
+    window.history.replaceState(null, "", "/device");
+    const api = deviceApi();
+    const page = mount(() => {
+      const device = useDeviceApproval(api, window.location.search, SCOPE);
+      return { device, field: useDeviceCodeField(device) };
+    });
+    for (const code of ["B", "BC", "BCD", "BCDF"]) {
+      act(() => page.current.field.inputProps.onChange(changeTo(code)));
+      expect(page.current.device.code).toBe(code);
+      expect(new URLSearchParams(window.location.search).get("code")).toBe(code);
+    }
+    window.history.replaceState(null, "", "/device?code=WDJBMJHT");
+    page.render();
+    expect(page.current.device.code).toBe("WDJB-MJHT");
+  });
+
+  it.each(["approve", "deny"] as const)(
+    "keeps the terminal %s result when clearing its own URL, but accepts an external code",
+    async (decision) => {
+      window.history.replaceState(null, "", "/device?code=WDJBMJHT");
+      const api = deviceApi();
+      const page = mount(() => {
+        const device = useDeviceApproval(api, window.location.search, SCOPE);
+        return { device, field: useDeviceCodeField(device) };
+      });
+      await settle();
+      act(() => page.current.device[decision]());
+      await settle();
+      page.render();
+      expect(window.location.search).toBe("");
+      expect(page.current.device.state.status).toBe(decision === "approve" ? "approved" : "denied");
+      expect(page.current.device.code).toBe("WDJB-MJHT");
+      window.history.replaceState(null, "", "/device?code=BCDFGHJK");
+      page.render();
+      await settle();
+      expect(page.current.device.code).toBe("BCDF-GHJK");
+      expect(page.current.device.state.status).toBe("ready");
+    },
+  );
+
   it("wires the field to its status line and keeps the code in the address until decided", async () => {
     window.history.replaceState({ idx: 3 }, "", "/device?from=mail&code=wdjbmjht");
     const api = deviceApi();
@@ -558,6 +600,152 @@ describe("createOAuthConsoleApi", () => {
 });
 
 describe("OAuth scope and operation lifetime", () => {
+  it.each(["input", "scope"] as const)(
+    "does not reuse a previous approval target or its extra fields after %s changes",
+    async (change) => {
+      type Extra = { workspaces: string[] };
+      const client = new QueryClient({
+        defaultOptions: { queries: { placeholderData: keepPreviousData } },
+      });
+      const nextConsent = deferred<ConsentView<Extra>>();
+      const nextDevice = deferred<DeviceView<Extra>>();
+      let changed = false;
+      let scope = SCOPE;
+      let search = "?client_id=x";
+      let code = "?code=WDJBMJHT";
+      const oldConsent = { ...VIEW, workspaces: ["old-workspace"] };
+      const oldDevice = { ...DEVICE, workspaces: ["old-workspace"] };
+      const consent: ConsentApi<void, Extra> = {
+        describe: () => (changed ? nextConsent.promise : Promise.resolve(oldConsent)),
+        approve: vi.fn(),
+      };
+      const device: DeviceApi<void, Extra> = {
+        describe: () => (changed ? nextDevice.promise : Promise.resolve(oldDevice)),
+        decide: vi.fn(),
+      };
+      const page = mount(
+        () => ({
+          consent: useConsentRequest(consent, search, scope),
+          device: useDeviceApproval(device, code, scope),
+        }),
+        client,
+      );
+      await settle();
+      expect(page.current.consent.state).toEqual({ status: "ready", view: oldConsent });
+      expect(page.current.device.state).toEqual({ status: "ready", view: oldDevice });
+      changed = true;
+      if (change === "scope") scope = { key: ["account-b", 1], isCurrent: () => true };
+      else {
+        search = "?client_id=y";
+        code = "?code=BCDFGHJK";
+      }
+      page.render();
+      expect(page.current.consent.state).toEqual({ status: "loading" });
+      expect(page.current.device.state).toEqual({ status: "loading" });
+      const newConsent = { ...VIEW, clientName: "New app", workspaces: ["new-workspace"] };
+      const newDevice = { ...DEVICE, clientName: "New script", workspaces: ["new-workspace"] };
+      nextConsent.resolve(newConsent);
+      nextDevice.resolve(newDevice);
+      await settle();
+      expect(page.current.consent.state).toEqual({ status: "ready", view: newConsent });
+      expect(page.current.device.state).toEqual({ status: "ready", view: newDevice });
+    },
+  );
+
+  it("invalidates the previous request by the layout commit, before passive cleanup", async () => {
+    const assign = vi.spyOn(window.location, "assign").mockImplementation(() => {});
+    const answer = deferred<{ ok: true; redirectTo: string }>();
+    let search = "?client_id=x";
+    let signal: AbortSignal | undefined;
+    let abortedAtCommit = false;
+    const api: ConsentApi = {
+      describe: async () => VIEW,
+      approve: (_query, _choice, options) => {
+        signal = options?.signal ?? undefined;
+        return answer.promise;
+      },
+    };
+    const page = mount(() => {
+      const requestSearch = search;
+      const consent = useConsentRequest(api, requestSearch, SCOPE);
+      useLayoutEffect(() => {
+        if (requestSearch === "?client_id=y") {
+          abortedAtCommit = signal?.aborted === true;
+          answer.resolve({ ok: true, redirectTo: "https://app.test/cb?code=old" });
+        }
+      }, [requestSearch]);
+      return consent;
+    });
+    await settle();
+    act(() => page.current.approve());
+    await settle();
+    search = "?client_id=y";
+    page.render();
+    await settle();
+    expect(abortedAtCommit).toBe(true);
+    expect(assign).not.toHaveBeenCalled();
+    expect(page.client.getMutationCache().getAll()[0]?.state).toMatchObject({
+      status: "error",
+      data: undefined,
+      error: expect.any(OAuthOperationChangedError),
+    });
+  });
+
+  it.each(["approve", "deny"] as const)(
+    "rejects stale consent and device %s after an awaited global settlement",
+    async (decision) => {
+      const assign = vi.spyOn(window.location, "assign").mockImplementation(() => {});
+      const boundary = identityBoundary();
+      const scope = boundary.capture();
+      const settlement = deferred<void>();
+      const settled = vi.fn((_data: unknown, error: unknown) =>
+        error === null ? settlement.promise : undefined,
+      );
+      const client = new QueryClient({ mutationCache: new MutationCache({ onSettled: settled }) });
+      const page = mount(
+        () => ({
+          consent: useConsentRequest(
+            {
+              describe: async () => VIEW,
+              approve: async () => ({ ok: true, redirectTo: "https://app.test/cb" }),
+            },
+            "?client_id=x",
+            scope,
+          ),
+          device: useDeviceApproval(deviceApi(), "?code=WDJBMJHT", scope),
+        }),
+        client,
+      );
+      await settle();
+      act(() => {
+        page.current.consent.approve();
+        page.current.device[decision]();
+      });
+      await settle();
+      expect(settled).toHaveBeenCalledTimes(2);
+      expect(
+        client
+          .getMutationCache()
+          .getAll()
+          .every((mutation) => mutation.state.status === "pending"),
+      ).toBe(true);
+      expect(assign).not.toHaveBeenCalled();
+      boundary.change();
+      settlement.resolve();
+      await settle();
+      for (const mutation of client.getMutationCache().getAll()) {
+        expect(mutation.state).toMatchObject({
+          status: "error",
+          data: undefined,
+          error: expect.any(OAuthOperationChangedError),
+        });
+      }
+      expect(assign).not.toHaveBeenCalled();
+      expect(page.current.device.state.status).not.toBe("approved");
+      expect(page.current.device.state.status).not.toBe("denied");
+    },
+  );
+
   it("isolates identical requests and codes across scopes in one query client", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity } } });
     const describeConsent = vi.fn(async (account: string) => ({ ...VIEW, clientName: account }));

@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/cnpj",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Look up a Brazilian company by CNPJ, the new CNPJ with letters too. Your own registry server first if you have one, then Minha Receita, BrasilAPI, cnpj.ws and ReceitaWS, all mapped to one record. Uses only fetch: runs in Node, Bun, browsers and Workers.",
   "type": "module",
   "license": "MIT",

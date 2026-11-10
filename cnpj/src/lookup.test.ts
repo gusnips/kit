@@ -8,6 +8,7 @@ import receitaWsBancoDoBrasil from "../fixtures/receita-ws-banco-do-brasil.json"
 import receitaWsUnknown from "../fixtures/receita-ws-unknown.json";
 import { CnpjNotFoundError, CnpjUnavailableError, lookupCnpj } from "./lookup.ts";
 import { minhaReceita, registry } from "./providers.ts";
+import type { CnpjProvider } from "./types.ts";
 
 const PETROBRAS = "33000167000101";
 const UNKNOWN = "99999998000147";
@@ -206,6 +207,46 @@ describe("lookupCnpj's clock, without AbortSignal.any and AbortSignal.timeout", 
     controller.abort(new Error("left the page"));
     await expect(lookup).rejects.toThrow("left the page");
     expect(hosts(fetch)).toEqual(["minhareceita.org"]);
+  });
+
+  /** Rejects with what `fail` makes the moment `signal` aborts. */
+  function failsOnAbort(signal: AbortSignal, fail: () => unknown): CnpjProvider {
+    return {
+      name: "synthetic",
+      lookup: () =>
+        new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(fail()));
+        }),
+    };
+  }
+
+  it("keeps a provider's own failure that lands with the abort, and asks no other provider", async () => {
+    const controller = new AbortController();
+    const broken = new Error("the registry went away");
+    const next = vi.fn<CnpjProvider["lookup"]>(async () => null);
+    const lookup = lookupCnpj(PETROBRAS, {
+      providers: [failsOnAbort(controller.signal, () => broken), { name: "next", lookup: next }],
+      signal: controller.signal,
+    });
+    controller.abort(new Error("left the page"));
+    await expect(lookup).rejects.toBe(broken);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("rejects with the caller's reason when the runtime ends the request with its own AbortError", async () => {
+    const controller = new AbortController();
+    const reason = new Error("left the page");
+    const lookup = lookupCnpj(PETROBRAS, {
+      providers: [
+        failsOnAbort(
+          controller.signal,
+          () => new DOMException("The operation was aborted.", "AbortError"),
+        ),
+      ],
+      signal: controller.signal,
+    });
+    controller.abort(reason);
+    await expect(lookup).rejects.toBe(reason);
   });
 
   it("leaves no timer behind", async () => {

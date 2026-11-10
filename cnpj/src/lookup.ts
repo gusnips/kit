@@ -32,7 +32,10 @@ export interface LookupCnpjOptions {
   providers?: CnpjProvider[];
   /** How long each provider gets before the next one is asked. 8 seconds. */
   timeoutMs?: number;
-  /** Aborting it rejects with its reason at once and asks no other provider. */
+  /**
+   * Aborting it rejects with its reason at once and asks no other provider. A provider that fails
+   * for another reason in that same moment rejects with its own error instead of the reason.
+   */
   signal?: AbortSignal;
   /**
    * Called with a URL string and `{ signal, headers }`, so a wrapper needs no more than this.
@@ -78,8 +81,9 @@ export async function lookupCnpj(
       if (record !== null) return record;
       answers.push(`${provider.name}: not found`);
     } catch (error) {
-      // `reason` is missing before Safari 15.4. The aborted fetch's own error says the same thing.
-      if (signal?.aborted) throw signal.reason ?? error;
+      // The caller aborted: the lookup ends with its reason and asks no other provider. A failure
+      // that is not the abort's own, landing in the same moment, keeps its identity.
+      if (signal?.aborted) throw endsAbort(error, signal) ? (signal.reason ?? error) : error;
       // Only the timer and the caller abort `attempt`, and the caller has not.
       const why = attempt.signal.aborted ? `no answer in ${timeoutMs} ms` : messageOf(error);
       const failure = new Error(`${provider.name}: ${why}`, { cause: error });
@@ -123,4 +127,13 @@ function providerSignal(
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Whether `error` is how the abort itself ends a request: the signal's reason, which is what a
+ * fetch rejects with, or an `AbortError` from a runtime that rejects with its own. `reason` is
+ * missing before Safari 15.4, and there the aborted fetch's own error says the same thing.
+ */
+function endsAbort(error: unknown, signal: AbortSignal): boolean {
+  return error === signal.reason || (error instanceof Error && error.name === "AbortError");
 }

@@ -71,6 +71,8 @@ await lookupCnpj(cnpj, { providers: [minhaReceita(), brasilApi()] });
 
 Each provider gets 8 seconds before the next one is asked. Change that with `timeoutMs`. Pass
 `signal` to cancel: the call rejects at once with the signal's reason and asks no other provider.
+A provider that fails for some other reason in that same moment rejects with its own error, so you
+can tell a cancelled lookup from a failed one.
 Pass `fetch` to use your own, in tests for example. Nothing is cached, so cache the record yourself
 if you look the same CNPJ up often.
 

@@ -265,9 +265,16 @@ quoteCurrency({
 prices do not all exist is not offered. The fallback has to be one you can always sell.
 
 `formatMoney` drops the cents on a whole amount (`R$ 97`, not `R$ 97,00`), because a pricing page
-that prints `,00` reads as an invoice. The reader's own currency reads by its symbol. A foreign one
-reads by its code (`USD 19` to a pt-BR reader), because a bare `$` is a dollar to one reader and a
-peso to another.
+that prints `,00` reads as an invoice. In a list where some prices have cents, pass `keepCents` to
+every price in it, so the list reads one way:
+
+```ts
+const keepCents = prices.some((cents) => cents % 100 !== 0);
+formatMoney(49_900, "brl", "pt-BR", { keepCents }); // → "R$ 499,00" beside "R$ 99,90"
+```
+
+The reader's own currency reads by its symbol. A foreign one reads by its code (`USD 19` to a pt-BR
+reader), because a bare `$` is a dollar to one reader and a peso to another.
 
 This file holds no price. Every amount is set by hand for its market, never converted, and that
 table is your catalog.

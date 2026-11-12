@@ -92,6 +92,12 @@ describe("formatMoney", () => {
     expect(formatMoney(1_490, "usd", "en")).toBe("$14.90");
   });
 
+  it("prints whole cents when asked, so a mixed price list lines up", () => {
+    expect(formatMoney(49_900, "brl", "pt-BR", { keepCents: true })).toBe(`R$${NBSP}499,00`);
+    expect(formatMoney(1_900, "usd", "en", { keepCents: true })).toBe("$19.00");
+    expect(formatMoney(1_490, "brl", "pt-BR", { keepCents: true })).toBe(`R$${NBSP}14,90`);
+  });
+
   it("reads a foreign currency by its ISO code, never a symbol the reader could mistake", () => {
     expect(formatMoney(1_900, "usd", "pt-BR")).toBe(`USD${NBSP}19`);
     expect(formatMoney(9_700, "brl", "en")).toBe(`BRL${NBSP}97`);

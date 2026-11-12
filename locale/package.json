@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/locale",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Where a language lives in a URL, how it crosses to another origin, which one a request asks for, what day it is in a time zone, and what currency a language pays in. Zero dependencies, no framework.",
   "type": "module",
   "license": "MIT",

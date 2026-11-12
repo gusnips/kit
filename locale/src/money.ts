@@ -97,18 +97,31 @@ export function currencyLabel(currency: Currency, locale: string): string {
   return symbol === code ? code : `${code} (${symbol})`;
 }
 
+export interface FormatMoneyOptions {
+  /**
+   * Print the cents on a whole amount too: `R$ 499,00`. Set it on every price of a list in which
+   * any price has cents, so `R$ 99,90` and `R$ 499,00` read as one list.
+   */
+  keepCents?: boolean;
+}
+
 /**
  * An amount in a reader's words: `R$ 97` in pt-BR, `$19` in en, `19 €` in es. A whole amount
- * drops its cents, because "R$ 97,00" on a pricing page reads as an invoice. The reader's own
- * currency reads by its symbol. A foreign one reads by its ISO code (`USD 19` to a pt-BR reader),
- * never a symbol they could take for their own: a bare `$` is a dollar to one reader and a peso
- * to another.
+ * drops its cents, because "R$ 97,00" on a pricing page reads as an invoice, unless `keepCents`
+ * asks for them. The reader's own currency reads by its symbol. A foreign one reads by its ISO
+ * code (`USD 19` to a pt-BR reader), never a symbol they could take for their own: a bare `$` is a
+ * dollar to one reader and a peso to another.
  */
-export function formatMoney(cents: number, currency: Currency, locale: string): string {
+export function formatMoney(
+  cents: number,
+  currency: Currency,
+  locale: string,
+  { keepCents = false }: FormatMoneyOptions = {},
+): string {
   return new Intl.NumberFormat(locale, {
     style: "currency",
     currency: currency.toUpperCase(),
     currencyDisplay: currencyForLocale(locale) === currency ? "symbol" : "code",
-    minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
+    minimumFractionDigits: cents % 100 === 0 && !keepCents ? 0 : 2,
   }).format(cents / 100);
 }

@@ -188,7 +188,7 @@ Folder names state their ROLE, not an npm scope — the same rule as providerkit
   `ioredis` are optional and reachable only behind their subpaths.
 - **`@gusnips/sdkgen`** is the part of an SDK generator that every copy wrote the same way: copying
   the API's own declarations with their comments, writing a JSON Schema as a type, writing the
-  methods from the API's operation list, and writing the files through the repo's prettier or
+  methods from the API's operation list, and writing the files through the repo's formatter (oxfmt or prettier) or
   checking them. The transport those methods run on ships as a file each SDK carries, beside
   `@gusnips/http`'s retry rule, so an SDK installs nothing. What stays in each adopter's script is
   the product: the names, the doc text and the members written by hand.
@@ -216,13 +216,13 @@ dedup, the same as in the frontend packages.
 │   │   ├── bin/          ← one bin, gusnips-migrate, which dispatches its two commands
 │   │   └── test/         ← the throwaway-database helpers the tests share
 │   └── sql/              ← supabase-stand-in.sql, also exported for `psql -f`
-├── sdkgen/               ← @gusnips/sdkgen. One required peer: prettier. One dependency: @gusnips/http.
+├── sdkgen/               ← @gusnips/sdkgen. No required peer; prettier is optional, for a repo with no oxfmt. One dependency: @gusnips/http.
 │   └── src/
 │       ├── contract.ts   ← liftContract(): the API's declarations, copied with their comments
 │       ├── types.ts      ← typeOf() and the field, comment and name writers; never a guess
 │       ├── methods.ts    ← sdkMethods(), and retrySource()/transportSource() for the files they run on
 │       ├── transport.ts  ← send(): a template each SDK carries, typechecked and tested here
-│       └── write.ts      ← writeGenerated(): the repo's prettier, then write or --check
+│       └── write.ts      ← writeGenerated(): the repo's formatter, oxfmt or prettier, then write or --check
 └── server/               ← @gusnips/server. Each optional peer sits behind its own subpath.
     └── src/
         ├── errors.ts     ← AppError and createAppError(): your code→status map is the contract

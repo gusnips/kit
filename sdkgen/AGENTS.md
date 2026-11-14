@@ -53,10 +53,17 @@ once the product's choices (doc text, a spec field, hand-written members) became
     than an adapter, because `liftContract` returns one string, so a caller cannot tell afterwards
     which declarations were roots.
 
-55. **The output goes through the repo's own prettier before it is compared.** The generated files
-    are checked in, so the generator's `--check` and `prettier --check` must never disagree about
-    one file. A file that cannot be read for a reason other than not existing throws rather than
-    reading as stale, because "stale" would send someone to regenerate over a permission error.
+55. **The output goes through the repo's own formatter before it is compared.** The generated files
+    are checked in, so the generator's `--check` and the repo's format check must never disagree
+    about one file. The formatter is the one the repo's files name: an `.oxfmtrc.json` or
+    `.oxfmtrc.jsonc` above the file means the repo's `oxfmt`, run with the text on stdin and
+    `--stdin-filepath` (oxfmt finds its config from that path, not from its working directory,
+    measured on 0.78.0); anything else means prettier, imported only then. There is no option,
+    because eight adopters call this with none and a second source of truth would let the two
+    checks disagree again. Prettier is an optional peer, and `scripts/check-exports.ts` lets its
+    dynamic import through for this package alone. A file that cannot be read for a reason other
+    than not existing throws rather than reading as stale, because "stale" would send someone to
+    regenerate over a permission error.
 
     All 50 planted defects were caught, with a green control. All five donor generators were
     rewritten on the package and ran their own `--check` green, which means every generated file

@@ -37,6 +37,14 @@ export interface PaletteEntry {
   dark: string;
 }
 
+/**
+ * A CSS variable that changes with the theme, such as `"--surface"`. Its light and dark values are
+ * read from the compiled stylesheet, where react-native-css keeps them under the
+ * `prefers-color-scheme` condition. This is the entry for an app whose classes paint variables:
+ * such a class compiles to a reference, not a colour, so there is no hex to read off it.
+ */
+export type PaletteVariable = `--${string}`;
+
 export interface NativeCssOptions {
   /** The app's folder. The other paths are read from it. Default: the current folder. */
   root?: string;
@@ -55,11 +63,12 @@ export interface NativeCssOptions {
   rem?: number;
   /**
    * Hex colours for what cannot take a `className`: an icon's `color`, the navigation theme, the
-   * status bar. Each name maps to a class in each scheme, and `colors.ts` gets the hex those classes
-   * compile to. Read from the stylesheet itself, so a change of tokens cannot restyle the classes
-   * and leave the icons in the old colours, which is what a hand-copied list of hex values did.
+   * status bar, a `RefreshControl` tint. Each name maps to a class in each scheme, or to a CSS
+   * variable that changes with the theme, and `colors.ts` gets the hex for each scheme. Read from
+   * the stylesheet itself, so a change of tokens cannot restyle the classes and leave the icons in
+   * the old colours, which is what a hand-copied list of hex values did.
    */
-  palette?: Record<string, PaletteEntry>;
+  palette?: Record<string, PaletteEntry | PaletteVariable>;
 }
 
 export interface NativeCssResult {
@@ -100,14 +109,7 @@ export async function buildNativeCss(options: NativeCssOptions = {}): Promise<Na
 
   const { palette } = options;
   if (palette) {
-    const scheme = (mode: keyof PaletteEntry) =>
-      Object.fromEntries(
-        Object.entries(palette).map(([name, entry]) => [
-          name,
-          colorOf(stylesheet, entry[mode], root),
-        ]),
-      );
-    const colors = { light: scheme("light"), dark: scheme("dark") };
+    const colors = paletteColors(stylesheet, palette);
     const colorsFile = join(outDir, "colors.ts");
     await writeFile(
       colorsFile,
@@ -234,18 +236,95 @@ function dropUnmappable(stylesheet: ReactNativeCssStyleSheet): void {
   );
 }
 
-function colorOf(stylesheet: ReactNativeCssStyleSheet, className: string, root: string): string {
-  const entry = Array.isArray(stylesheet.s)
-    ? stylesheet.s.find((each) => Array.isArray(each) && each[0] === className)
-    : undefined;
-  const hex = entry ? JSON.stringify(entry[1]).match(/#[0-9a-fA-F]{3,8}\b/)?.[0] : undefined;
-  if (hex === undefined)
-    throw new Error(
-      `No colour for "${className}" in the compiled stylesheet. Tailwind writes only the classes ` +
-        `it finds in the app's files, so put "${className}" in a file under ${root} (a list of ` +
-        "the palette's classes beside the code that reads the colours keeps them found).",
+type Scheme = "light" | "dark";
+
+/**
+ * The hex of every palette entry, in both schemes: what `colors.ts` holds. Exported for the test,
+ * and for a script that builds the stylesheet some other way.
+ */
+export function paletteColors(
+  stylesheet: ReactNativeCssStyleSheet,
+  palette: Record<string, PaletteEntry | PaletteVariable>,
+): Record<Scheme, Record<string, string>> {
+  const scheme = (mode: Scheme) =>
+    Object.fromEntries(
+      Object.entries(palette).map(([name, entry]) => [
+        name,
+        typeof entry === "string"
+          ? variableColor(stylesheet, entry, mode)
+          : classColor(stylesheet, entry[mode]),
+      ]),
     );
-  return hex;
+  return { light: scheme("light"), dark: scheme("dark") };
+}
+
+const HEX = /^#[0-9a-fA-F]{3,8}$/;
+
+function classColor(stylesheet: ReactNativeCssStyleSheet, className: string): string {
+  const entry = stylesheet.s?.find((each) => each[0] === className);
+  if (entry === undefined)
+    throw new Error(
+      `No class "${className}" in the compiled stylesheet. Tailwind writes only the classes it ` +
+        `finds in the app's files, so put "${className}" in one (a list of the palette's classes ` +
+        "beside the code that reads the colours keeps them found).",
+    );
+  const json = JSON.stringify(entry[1]);
+  const hex = json.match(/#[0-9a-fA-F]{3,8}\b/)?.[0];
+  if (hex !== undefined) return hex;
+  const variable = json.match(/"var",\["([^"]+)"/)?.[1];
+  throw new Error(
+    variable === undefined
+      ? `"${className}" paints no hex colour.`
+      : `"${className}" paints var(--${variable}), which has no colour of its own until the theme ` +
+          `picks one. Name the variable instead: "--${variable}".`,
+  );
+}
+
+/**
+ * A variable's value in one scheme. react-native-css keeps a variable that can change under the
+ * stylesheet's `vr`, as a list of values, each with the conditions it holds under: the dark value
+ * under `prefers-color-scheme: dark`, the default with none. A value that points at another
+ * variable is followed, in the same scheme.
+ */
+function variableColor(
+  stylesheet: ReactNativeCssStyleSheet,
+  variable: string,
+  scheme: Scheme,
+  seen: ReadonlySet<string> = new Set(),
+): string {
+  const name = variable.replace(/^--/, "");
+  if (seen.has(name))
+    throw new Error(`--${name} refers to itself through ${[...seen].join(", ")}.`);
+  const values = stylesheet.vr?.find(([each]) => each === name)?.[1];
+  if (values === undefined)
+    throw new Error(
+      `No variable --${name} in the compiled stylesheet. react-native-css keeps a variable only ` +
+        "when its value can change, such as one set again for dark mode; a fixed one is written " +
+        'into the classes that use it, so name one of those classes instead: { "light": "bg-x", ' +
+        '"dark": "bg-x" }.',
+    );
+  const holdsFor = (wanted: Scheme | null) =>
+    values.find(([, conditions]) =>
+      wanted === null
+        ? conditions === undefined || conditions.length === 0
+        : conditions?.length === 1 &&
+          conditions[0]?.[0] === "=" &&
+          conditions[0]?.[1] === "prefers-color-scheme" &&
+          conditions[0]?.[2] === wanted,
+    );
+  const light = holdsFor("light") ?? holdsFor(null);
+  const value = (scheme === "dark" ? (holdsFor("dark") ?? light) : light)?.[0];
+  if (typeof value === "string" && HEX.test(value)) return value;
+  const next = referencedVariable(value);
+  if (next !== null) return variableColor(stylesheet, next, scheme, new Set([...seen, name]));
+  throw new Error(`--${name} in ${scheme} mode is ${JSON.stringify(value)}, not a hex colour.`);
+}
+
+/** The variable a `var(--x)` value points at, in react-native-css's `[{}, "var", ["x"], …]` shape. */
+function referencedVariable(value: unknown): string | null {
+  if (!Array.isArray(value) || value[1] !== "var" || !Array.isArray(value[2])) return null;
+  const [name] = value[2];
+  return typeof name === "string" ? name : null;
 }
 
 function missing(name: string): string {

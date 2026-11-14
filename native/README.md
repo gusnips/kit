@@ -50,8 +50,12 @@ module.exports = nativeMetroConfig(getDefaultConfig(__dirname), {
 
 What it adds to the config:
 
-- **The monorepo.** `watchFolders` and `nodeModulesPaths` point at the root, so a workspace package
-  that ships TypeScript source resolves like any other. Metro does not find workspaces on its own.
+- **The monorepo.** Metro does not find workspaces on its own. It now watches the root's
+  `node_modules` and each folder in the root `package.json`'s `workspaces`, so a workspace package
+  that ships TypeScript source resolves like any other. It never watches the root itself: without
+  watchman, Metro lists every watched folder with `find`, and a root also holds other checkouts
+  (one had 55 under `.claude/worktrees`, each with its own `node_modules`). That crawl
+  failed after four minutes with "Invalid string length", and a `blockList` does not stop it.
 - **One React.** bun's isolated store keeps a spare `react` at its root. A package that forgets to
   declare react as a peer finds that one instead, and the bundle has two: your screens render, and
   that package's hooks crash with "Cannot read property 'useMemo' of null". Every `react` and

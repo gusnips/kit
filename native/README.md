@@ -22,16 +22,17 @@ meet at launch.
 
 ## What is in it
 
-| Import                     | What it does                                                             | Also needs                                            |
-| -------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------- |
-| `@gusnips/native`          | `openSseStream`: server-sent events over XHR                             | nothing more                                          |
-| `@gusnips/native/theme`    | `createNativeTheme`, `useThemeColors`: light, dark or system, remembered | `@react-native-async-storage/async-storage`           |
-| `@gusnips/native/network`  | `useIsOffline`, `isDeviceOffline`                                        | `@react-native-community/netinfo`                     |
-| `@gusnips/native/query`    | `installQueryManagers`: React Query on app focus and network             | `@tanstack/react-query`, netinfo                      |
-| `@gusnips/native/i18n`     | `createNativeLanguage`: the phone's language, or the saved one           | `react-native-localize`, async-storage, `i18next`     |
-| `@gusnips/native/supabase` | `supabaseAuthStorage`: where supabase-js keeps the session               | async-storage, `@supabase/supabase-js`                |
-| `@gusnips/native/metro`    | `nativeMetroConfig`, for `metro.config.js`                               | nothing more                                          |
-| `@gusnips/native/css`      | `buildNativeCss` and the `gusnips-native-css` command                    | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
+| Import                        | What it does                                                             | Also needs                                            |
+| ----------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `@gusnips/native`             | `openSseStream`: server-sent events over XHR                             | nothing more                                          |
+| `@gusnips/native/theme`       | `createNativeTheme`, `useThemeColors`: light, dark or system, remembered | `@react-native-async-storage/async-storage`           |
+| `@gusnips/native/network`     | `useIsOffline`, `isDeviceOffline`                                        | `@react-native-community/netinfo`                     |
+| `@gusnips/native/query`       | `installQueryManagers`: React Query on app focus and network             | `@tanstack/react-query`, netinfo                      |
+| `@gusnips/native/i18n`        | `createNativeLanguage`: the phone's language, or the saved one           | `react-native-localize`, async-storage, `i18next`     |
+| `@gusnips/native/supabase`    | `supabaseAuthStorage`: where supabase-js keeps the session               | async-storage, `@supabase/supabase-js`                |
+| `@gusnips/native/metro`       | `nativeMetroConfig`, for `metro.config.js`                               | nothing more                                          |
+| `@gusnips/native/css`         | `buildNativeCss` and the `gusnips-native-css` command                    | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
+| `gusnips-native-hermes-check` | compiles the production bundle with Hermes, without Xcode                | `hermes-compiler`                                     |
 
 Every app needs `react`, `react-native`, `@gusnips/react` and `@gusnips/http`. The rest are
 optional: you install one only when you import the line that uses it. Most of them carry native
@@ -328,6 +329,36 @@ supabase-js picks itself, so moving onto this signs nobody out. Pass the same ob
 
 Use `flowType: "pkce"`. A sign-in returns through your app's URL scheme, which any app can claim,
 and under the default flow that URL carries the refresh token.
+
+## Does it compile for Hermes?
+
+A release build runs `hermesc` over your bundle, and that is where syntax Hermes does not parse
+fails: in the archive step in Xcode, minutes into a build, or not at all in a CI with no Mac.
+`gusnips-native-hermes-check` makes the same production bundle and compiles it with your app's
+`hermesc`, so you find out first:
+
+```bash
+gusnips-native-hermes-check            # both bundles, from the app's folder
+gusnips-native-hermes-check --platform ios
+```
+
+```text
+src/lib/walk.ts:12:9: async generators are unsupported (ios)
+hermes check: 1 problem(s). Hermes would refuse this bundle.
+```
+
+Each error points at your own file through the bundle's source map. The command exits 1 when
+Hermes would refuse the bundle, so CI can run it.
+
+- **It takes minutes**, because it is a real production bundle. Run it before a release or in CI,
+  not in `lint` or on every save.
+- **It finds what the compiler finds**: syntax Hermes does not parse, such as async generators or
+  the regex `v` flag, and regex literals it refuses. Unicode property escapes (`\p{L}`) and
+  lookbehind compile.
+- **It does not find a missing runtime API.** `Array.prototype.findLast`, an `Intl` option Hermes
+  ignores, or a pattern built with `new RegExp` at runtime compile fine and fail only on a phone.
+- It needs `hermes-compiler` in the app, at the version React Native depends on. A release build
+  needs it there anyway.
 
 ## Also worth knowing
 

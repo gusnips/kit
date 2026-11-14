@@ -68,9 +68,10 @@
     },
     "native": {
       "name": "@gusnips/native",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "bin": {
         "gusnips-native-css": "./dist/node/bin/gusnips-native-css.js",
+        "gusnips-native-hermes-check": "./dist/node/bin/gusnips-native-hermes-check.js",
       },
       "devDependencies": {
         "@gusnips/http": ">=0.2.0 <1",

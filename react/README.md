@@ -140,6 +140,37 @@ const { error } = await signOutOtherDevices(supabase.auth);
 Pass the same object to `createSupabaseSessionAdapter(supabase.auth, authStorage)` and the API
 client's sign-out goes through the helper too.
 
+### Sign-in errors in the describer
+
+`createErrorDescriber` reads anything that is not an `ApiError` as a request that never landed, so
+a wrong password handed to it as it is says "check your connection". `apiErrorFromAuth` turns a
+supabase-js auth error into an `ApiError` first, and the same arms, retry rule and recovery control
+then cover sign-in too:
+
+```ts
+import { apiErrorFromAuth, type AuthErrorCode } from "@gusnips/react/supabase";
+
+const codes: Partial<Record<AuthErrorCode, ErrorArm>> = {
+  invalid_credentials: () => ({ cause: t("auth.wrongPassword") }),
+  email_not_confirmed: () => ({ cause: t("auth.confirmEmail"), fix: t("auth.resend") }),
+  over_email_send_rate_limit: () => ({ cause: t("auth.tooManyEmails") }),
+};
+
+const { error } = await supabase.auth.signInWithPassword({ email, password });
+if (error) show(describe(apiErrorFromAuth(error)));
+```
+
+- It keeps auth-js's `code` and the status, so a 429 is retried like a 429 and a 5xx like a 5xx.
+- `AuthErrorCode` is read off the installed auth-js's own type, so an arm for a code it does not
+  name is a compile error. A newer server can still send one it lacks; `fallback` covers that.
+- It puts back two codes auth-js moves: `session_not_found`, and the code an email link's callback
+  URL names (`otp_expired` for a spent link).
+- `weak_password` keeps its `reasons` in `details`, because they say what to change.
+- It drops GoTrue's `message`. That text is English only, often names the wrong cause, and would
+  reach the screen through the built-in arm. A code with no arm shows your `unexpected` copy.
+- When nothing came back at all, the error is returned as it is, and the describer calls it a
+  connection problem, which is what it is.
+
 Supabase email links have two complete patterns. Keep either one, never half of each:
 
 - A link carrying `token_hash` needs one explicit `verifyOtp` call. Guard it against React

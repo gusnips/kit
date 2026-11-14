@@ -4,13 +4,18 @@ import {
   AuthPKCEGrantCodeExchangeError,
   AuthRefreshDiscardedError,
   AuthRetryableFetchError,
+  AuthSessionMissingError,
   AuthUnknownError,
   createClient,
 } from "@supabase/supabase-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SIGN_OUT_TIMEOUT_MS } from "./api-client.ts";
+import { ApiError } from "./api-error.ts";
+import { createErrorDescriber, type ErrorArm } from "./describe-error.ts";
 import {
+  apiErrorFromAuth,
   createSupabaseSessionAdapter,
+  type AuthErrorCode,
   isAuthOutage,
   parseAuthCallback,
   signOutEvenOffline,
@@ -570,5 +575,126 @@ describe("parseAuthCallback", () => {
     expect(
       parseAuthCallback("", "#error_code=over_email_send_rate_limit&error_description=x&sb="),
     ).toEqual({ kind: "error", error: null, code: "over_email_send_rate_limit", cancelled: false });
+  });
+});
+
+describe("apiErrorFromAuth", () => {
+  /** A real client whose server answers every request with this status and body. */
+  async function refusal(status: number, body: unknown, apiVersion: string | null = "2024-01-01") {
+    const answer: typeof fetch = async () =>
+      Response.json(body, {
+        status,
+        headers: apiVersion === null ? {} : { "x-supabase-api-version": apiVersion },
+      });
+    const auth = createClient(PROJECT_URL, "anon-key", {
+      auth: { storage: memoryStorage(), autoRefreshToken: false },
+      global: { fetch: answer },
+    }).auth;
+    const { error } = await auth.signInWithPassword({ email: "a@b.co", password: "pw" });
+    return error;
+  }
+
+  const copy = {
+    network: "No connection",
+    networkHint: "Check it",
+    unexpected: "Something failed",
+    retrySoon: "Try again soon",
+  };
+  const arm =
+    (cause: string): ErrorArm =>
+    () => ({ cause });
+  const codes: Partial<Record<AuthErrorCode, ErrorArm>> = {
+    invalid_credentials: arm("Wrong email or password"),
+    email_not_confirmed: arm("Confirm your email first"),
+    otp_expired: arm("That link has expired"),
+    over_email_send_rate_limit: arm("Too many emails"),
+    over_request_rate_limit: arm("Too many tries"),
+    user_not_found: arm("No account with that email"),
+    weak_password: arm("Pick a stronger password"),
+    same_password: arm("That is your current password"),
+    session_not_found: arm("Sign in again"),
+  };
+  const describe = createErrorDescriber({ copy, formatWait: String, codes });
+
+  // The codes an adopter's web and phone apps each switched on by hand, sent the way GoTrue sends
+  // them and read back through the installed auth-js.
+  it.each([
+    ["invalid_credentials", 400, "Wrong email or password", "none"],
+    ["email_not_confirmed", 400, "Confirm your email first", "none"],
+    ["otp_expired", 403, "That link has expired", "none"],
+    ["over_email_send_rate_limit", 429, "Too many emails", "retry"],
+    ["over_request_rate_limit", 429, "Too many tries", "retry"],
+    ["user_not_found", 404, "No account with that email", "none"],
+    ["weak_password", 422, "Pick a stronger password", "none"],
+    ["same_password", 422, "That is your current password", "none"],
+  ] as const)("reads %s (%i) as the arm for it", async (code, status, cause, recover) => {
+    const converted = apiErrorFromAuth(await refusal(status, { code, msg: "GoTrue's English" }));
+    expect(converted).toBeInstanceOf(ApiError);
+    expect(converted).toMatchObject({ status, code, message: "" });
+    expect(describe(converted)).toMatchObject({ cause, recover });
+  });
+
+  it("keeps weak_password's reasons, which say what to change", async () => {
+    const error = await refusal(422, {
+      code: "weak_password",
+      msg: "Password is too weak",
+      weak_password: { reasons: ["length", "pwned"] },
+    });
+    expect(apiErrorFromAuth(error)).toMatchObject({ details: { reasons: ["length", "pwned"] } });
+  });
+
+  it("reads an older server's error_code too", async () => {
+    const error = await refusal(400, { error_code: "invalid_credentials", msg: "x" }, null);
+    expect(apiErrorFromAuth(error)).toMatchObject({ code: "invalid_credentials" });
+  });
+
+  it("puts back the codes auth-js moves elsewhere", async () => {
+    // auth-js turns this server code into a class with no code at all.
+    const missing = await refusal(404, { code: "session_not_found", msg: "x" });
+    expect(missing).toBeInstanceOf(AuthSessionMissingError);
+    expect(apiErrorFromAuth(missing)).toMatchObject({ code: "session_not_found" });
+    // A spent email link: the callback URL names the code, and auth-js keeps it in `details`.
+    const spent = new AuthImplicitGrantRedirectError("Email link is invalid or has expired", {
+      error: "access_denied",
+      code: "otp_expired",
+    });
+    expect(apiErrorFromAuth(spent)).toMatchObject({ status: 400, code: "otp_expired" });
+    expect(describe(apiErrorFromAuth(spent))).toMatchObject({ recover: "none" });
+  });
+
+  it("makes the two callback URL errors answers, not a retryable 500", () => {
+    const noCode = apiErrorFromAuth(new AuthPKCEGrantCodeExchangeError("No code detected."));
+    expect(noCode).toMatchObject({ status: 400, code: undefined });
+    expect(describe(noCode)).toEqual({ cause: "Something failed", recover: "none" });
+  });
+
+  it("never shows GoTrue's message, even for a code with no arm", async () => {
+    const error = await refusal(400, { code: "captcha_failed", msg: "GoTrue's English" });
+    expect(describe(apiErrorFromAuth(error))).toMatchObject({ cause: "Something failed" });
+  });
+
+  it("leaves a request that never landed for the describer to call a connection problem", async () => {
+    const auth = createClient(PROJECT_URL, "anon-key", {
+      auth: { storage: memoryStorage(), autoRefreshToken: false },
+      global: { fetch: unreachable },
+    }).auth;
+    const { error } = await auth.signInWithPassword({ email: "a@b.co", password: "pw" });
+    expect(apiErrorFromAuth(error)).toBe(error);
+    expect(describe(apiErrorFromAuth(error))).toMatchObject({ cause: "No connection" });
+  });
+
+  it("keeps a 5xx retryable, and returns anything else untouched", async () => {
+    const down = apiErrorFromAuth(await refusal(503, { msg: "Service Unavailable" }));
+    expect(down).toMatchObject({ status: 503 });
+    expect(describe(down).recover).toBe("retry");
+    const other = new Error("not auth");
+    expect(apiErrorFromAuth(other)).toBe(other);
+  });
+
+  it("types the arms with the codes the installed auth-js names", () => {
+    const known: AuthErrorCode = "invalid_credentials";
+    // @ts-expect-error a code auth-js does not name is refused at the arm
+    const unknown: AuthErrorCode = "not_a_code";
+    expect([known, unknown]).toHaveLength(2);
   });
 });

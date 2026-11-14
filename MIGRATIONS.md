@@ -933,6 +933,60 @@ second on a bare address, then jumped to theirs.
   i18next sees the list. A fleet audit found it by running the real detector on three lists; the
   test does the same.
 
+## TypeScript 7, oxlint and oxfmt (kit first, then every app)
+
+Moved on 2026-11-14, kit first. The reason is one error: typescript-eslint 8.72.2 peers
+`typescript <6.1` and throws "does not support TS 7.0". So the compiler, the linter and the
+formatter change in one pull request, and the ESLint packages leave in it.
+
+**What an app changes, in the order that worked:**
+
+- **`typescript` to `^7.0.2`** in every `package.json` that declares it. `tsc` is the same command.
+  Three tsconfig errors come up. `baseUrl` is removed (TS5102): drop it, and start each `paths`
+  value with `./` (TS5090). `types` now defaults to `[]`, so a package that uses `node:*`, `Bun` or
+  `import.meta.dir` needs `"types": ["node"]` or `["bun"]`. And a tsconfig with an `outDir` needs
+  an explicit `rootDir` (TS5011), because TS 7 no longer guesses the common source folder. Every kit
+  package that emits already named both, so its tsconfigs did not change.
+- **Nothing may `import ts from "typescript"`.** The compiler's JavaScript API is only under
+  `typescript/unstable/*` in TS 7. Kit had one such file, a sdkgen test that typechecked generated
+  code through the API. It now writes a tsconfig and runs the package's own `tsc`, then reads the
+  `error TS` lines, which is the command an adopter runs on that code. Do not keep a second
+  TypeScript around for it.
+- **ESLint goes in the same change.** Replace it with `@gusnips/oxlint` and re-express your own
+  rules in `.oxlintrc.json`. Four things in oxlint are different from ESLint: it does not look
+  upward for a config, so each workspace's `lint` script passes `-c`; `ignorePatterns` in an
+  extended file are ignored, so list them in your own file; set `"plugins": []`, or oxlint adds its
+  `unicorn` and `oxc` plugins and reports things ESLint never did; and an `overrides` entry cannot
+  extend a preset, so a rule set that applied to some folders (kit's react-hooks rules) needs a
+  `.oxlintrc.json` in those folders.
+- **Prove the swap with ESLint still running somewhere.** Once the branch is on TS 7, ESLint cannot
+  start, so run it in a second worktree cut from `origin/main`. Compare over the same files: a
+  clean tree gives zero in both, then plant one violation per rule family in each package and
+  compare rule and line. Kit: 257 files, 0 findings in both; 35 planted findings, 35 in both, the
+  react-hooks rules in `react/` only. `exhaustive-deps` lands on another line: oxlint reports the call, ESLint the
+  dependency array.
+- **oxfmt for Prettier.** `bunx oxfmt@0.78.0 --migrate prettier` writes `.oxfmtrc.json` from
+  `.prettierrc`, including the ignore list. Check `oxfmt --list-different` first: kit changed 10 of
+  349 files (long unions break one member per line, a few markdown continuation lines move). Keep
+  an `.oxfmtrc.json` where `@gusnips/sdkgen` writes files, since it formats with oxfmt when that
+  file is above the generated one, and a `db-types` script passes `--format "oxfmt --stdin-filepath
+  ..."` instead of Prettier.
+
+**A published package gets one more check: compare what the registry would receive.** Pack every
+package on `origin/main` (old compiler) and on the branch (new one), with `bun pm pack`, unpack
+both and run `diff -r`. For kit the 835 files and their names are identical. Contents differ in
+five ways, none a change a TypeScript 5 consumer can feel: 11 `package.json` files, in the
+`typescript` range and the `lint` script; 67 source maps, in their `mappings` only; the shipped
+`src` files and three READMEs, which oxfmt and these notes touched; five `.d.ts` files, where TS 7
+orders some properties and union members differently, reuses an `infer` name in a separate scope,
+and names a type by its original export instead of an alias for it (`ComboboxInputProps` where TS 5
+wrote `AutocompleteInputProps`, which is `export type { ComboboxInputProps as
+AutocompleteInputProps }`; all 24 names resolve at the root of `@base-ui/react` at 1.6.0, the peer
+floor, and at 1.9.0); and one `.js` file, where an import list is in another order and a comment
+inside a JSX expression is gone. Then read the new `.d.ts` with the OLD compiler: TS 5.9 with `skipLibCheck` off gave the same
+errors on the old and the new output for `react`, `server` and `http` (none for the last two).
+Nothing was published because tooling changed.
+
 ## How to migrate a repo — the check that is not optional
 
 **Read the code you are deleting against the code replacing it, function by function. Its

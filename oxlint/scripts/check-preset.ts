@@ -21,6 +21,10 @@
  *   renames shows up here as `undefined` instead of as a pass.
  * - the positive control: the same fixture through a copy of each preset with its rules deleted
  *   must NOT match. A check that passes on an empty preset is not looking at the preset.
+ * - the plugin (`plugin.js`): its two rules flag exactly what the ESLint selectors they replace
+ *   flagged, load from an installed package whether oxlint runs at the repo root or in a nested
+ *   workspace, stay off in the presets, and can be turned off for some files. The same fixture ran
+ *   through ESLint's own `no-restricted-syntax` once, by hand, when the rules were written.
  *
  * Run: bun run scripts/check-preset.ts
  */
@@ -161,6 +165,57 @@ const REACT_HOOKS_RECOMMENDED: Record<string, string> = {
   "react/set-state-in-render": "deny",
 };
 
+/** Where the plugin's fixture lives: a workspace folder, like the apps that use the plugin. */
+const WORKSPACE = "apps/web";
+
+const PLUGIN_FIXTURE: Record<string, string> = {
+  // Reported on the inner `x as unknown`, so the line is where `x` starts.
+  "cast.ts": `export const flagged = (value: string) => value as unknown as number;
+export const alone = (value: string) => value as unknown;
+export const constant = ["a"] as const;
+export const parenthesized = (value: string) => (value as unknown) as number;
+export const twice = (value: string) => value as unknown as unknown;
+export const through = (value: string) => value as string as number;
+export const nextLine = (value: string) =>
+  value as unknown as number;
+`,
+  // Tests may cast through unknown: the override in the config turns the rule off for them.
+  "cast.test.ts": `export const inTest = (value: string) => value as unknown as number;
+`,
+  "effects.ts": `import * as React from "react";
+import { useEffect, useInsertionEffect, useLayoutEffect } from "react";
+
+declare function cleanup(): void;
+
+export function Panel() {
+  useEffect(() => cleanup(), []);
+  useLayoutEffect(() => cleanup(), []);
+  useInsertionEffect(() => cleanup(), []);
+  useEffect(() => {
+    cleanup();
+  }, []);
+  useEffect(() => () => cleanup(), []);
+  useEffect(function () {
+    cleanup();
+  }, []);
+  useEffect(() => function () {}, []);
+  useEffect(cleanup, []);
+  React.useEffect(() => cleanup(), []);
+  return null;
+}
+`,
+};
+
+const PLUGIN_DIAGNOSTICS = [
+  "cast.ts:1 error gusnips(no-as-unknown-as)",
+  "cast.ts:4 error gusnips(no-as-unknown-as)",
+  "cast.ts:5 error gusnips(no-as-unknown-as)",
+  "cast.ts:8 error gusnips(no-as-unknown-as)",
+  "effects.ts:7 error gusnips(effect-body-must-be-block)",
+  "effects.ts:8 error gusnips(effect-body-must-be-block)",
+  "effects.ts:9 error gusnips(effect-body-must-be-block)",
+];
+
 interface Output {
   diagnostics: {
     code: string;
@@ -180,37 +235,76 @@ function oxlint(cwd: string, args: string[]): string {
 
 /** The preset files as they are on disk, by file name. */
 const SHIPPED = Object.fromEntries(
-  ["base.json", "react.json"].map((name) => [name, readFileSync(join(PACKAGE, name), "utf8")]),
+  ["base.json", "react.json", "plugin.js", "package.json"].map((name) => [
+    name,
+    readFileSync(join(PACKAGE, name), "utf8"),
+  ]),
 );
 
 /**
- * A throwaway repo laid out the way an adopter's is: the preset files in
- * `node_modules/@gusnips/oxlint`, and a `.oxlintrc.json` that is one `extends` line.
+ * A throwaway repo laid out the way an adopter's is: the package files in
+ * `node_modules/@gusnips/oxlint`, a `.oxlintrc.json` with `config` in it, and `fixture` at `where`.
  */
-function repoExtending(entry: string, presets: Record<string, string>): string {
+function repoWith(
+  config: object,
+  presets: Record<string, string>,
+  fixture: Record<string, string>,
+  where = ".",
+): string {
   const dir = mkdtempSync(join(tmpdir(), "oxlint-preset-"));
   const installed = join(dir, "node_modules", "@gusnips", "oxlint");
   mkdirSync(installed, { recursive: true });
   for (const [name, source] of Object.entries(presets))
     writeFileSync(join(installed, name), source);
-  writeFileSync(
-    join(dir, ".oxlintrc.json"),
-    JSON.stringify({ extends: [`./node_modules/@gusnips/oxlint/${entry}`] }),
-  );
-  for (const [name, source] of Object.entries(FIXTURE)) writeFileSync(join(dir, name), source);
+  writeFileSync(join(dir, ".oxlintrc.json"), JSON.stringify(config));
+  mkdirSync(join(dir, where), { recursive: true });
+  for (const [name, source] of Object.entries(fixture))
+    writeFileSync(join(dir, where, name), source);
   return dir;
+}
+
+/** The repo whose whole `.oxlintrc.json` is `extends` one preset file. */
+function repoExtending(entry: string, presets: Record<string, string>): string {
+  return repoWith({ extends: [`./node_modules/@gusnips/oxlint/${entry}`] }, presets, FIXTURE);
+}
+
+/** Runs oxlint in `cwd` over `files` and lists each finding as `file:line severity code`. */
+function findings(cwd: string, config: string, files: string[]): string[] {
+  const out: Output = JSON.parse(oxlint(cwd, ["-c", config, "-f", "json", ...files]));
+  return out.diagnostics
+    .map((d) => `${d.filename}:${String(d.labels[0]?.span.line)} ${d.severity} ${d.code}`)
+    .sort();
 }
 
 function diagnose(entry: string, presets: Record<string, string> = SHIPPED): string[] {
   const dir = repoExtending(entry, presets);
   try {
     // The fixture files by name: a bare `.` also walks the preset copy in node_modules.
-    const out: Output = JSON.parse(
-      oxlint(dir, ["-c", ".oxlintrc.json", "-f", "json", ...Object.keys(FIXTURE)]),
+    return findings(dir, ".oxlintrc.json", Object.keys(FIXTURE));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The plugin fixture, linted from the repo root and again from inside the workspace the way a
+ * workspace's own `lint` script runs (`oxlint -c ../../.oxlintrc.json src`). Both must give the
+ * same findings, so the second list is returned with the workspace prefix put back.
+ */
+function diagnosePlugin(
+  config: object,
+  presets: Record<string, string> = SHIPPED,
+): [fromRoot: string[], fromWorkspace: string[]] {
+  const dir = repoWith(config, presets, PLUGIN_FIXTURE, join(WORKSPACE, "src"));
+  try {
+    const files = Object.keys(PLUGIN_FIXTURE).map((name) => join(WORKSPACE, "src", name));
+    const fromRoot = findings(dir, ".oxlintrc.json", files).map((line) =>
+      line.replace(`${WORKSPACE}/src/`, ""),
     );
-    return out.diagnostics
-      .map((d) => `${d.filename}:${String(d.labels[0]?.span.line)} ${d.severity} ${d.code}`)
-      .sort();
+    const fromWorkspace = findings(join(dir, WORKSPACE), "../../.oxlintrc.json", ["src"]).map(
+      (line) => line.replace("src/", ""),
+    );
+    return [fromRoot, fromWorkspace];
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -267,11 +361,41 @@ const emptyReact = diagnose("react.json", {
 if (differences([...BASE_DIAGNOSTICS, ...REACT_DIAGNOSTICS].sort(), emptyReact).length === 0)
   problems.push("control: a react.json with no rules produced the expected diagnostics.");
 
+// The plugin. A repo opts in with `jsPlugins` and the two rules, and turns them off for tests.
+const asked = {
+  extends: ["./node_modules/@gusnips/oxlint/react.json"],
+  jsPlugins: ["@gusnips/oxlint/plugin"],
+  rules: { "gusnips/no-as-unknown-as": "error", "gusnips/effect-body-must-be-block": "error" },
+  overrides: [{ files: ["**/*.test.ts"], rules: { "gusnips/no-as-unknown-as": "off" } }],
+};
+const pluginWanted = [...PLUGIN_DIAGNOSTICS].sort();
+const [pluginFromRoot, pluginFromWorkspace] = diagnosePlugin(asked);
+report("plugin, at the root", differences(pluginWanted, pluginFromRoot));
+report("plugin, in a workspace", differences(pluginWanted, pluginFromWorkspace));
+// Opt-in: the presets alone say nothing about either rule.
+for (const entry of ["base.json", "react.json"]) {
+  const [quiet] = diagnosePlugin({ extends: [`./node_modules/@gusnips/oxlint/${entry}`] });
+  report(`${entry} on the plugin fixture`, differences([], quiet));
+}
+// The positive control: a plugin with its rules deleted must not pass, whether oxlint rejects the
+// config (a rule it cannot find is an error) or finds nothing.
+const hollow = {
+  ...SHIPPED,
+  "plugin.js": 'export default { meta: { name: "gusnips" }, rules: {} };',
+};
+let hollowPasses = false;
+try {
+  hollowPasses = differences(pluginWanted, diagnosePlugin(asked, hollow)[0]).length === 0;
+} catch {
+  // oxlint refused the config: the control holds.
+}
+if (hollowPasses) problems.push("control: a plugin with no rules produced the expected findings.");
+
 if (problems.length > 0) {
   console.error(`✗ oxlint presets: ${String(problems.length)} problem(s)\n`);
   for (const problem of problems) console.error(`  ${problem}`);
   process.exit(1);
 }
 console.log(
-  `✓ oxlint presets: ${String(BASE_DIAGNOSTICS.length)} base and ${String(REACT_DIAGNOSTICS.length)} react diagnostics, ${String(wanted.length)} rule severities, 2 controls.`,
+  `✓ oxlint presets: ${String(BASE_DIAGNOSTICS.length)} base and ${String(REACT_DIAGNOSTICS.length)} react diagnostics, ${String(wanted.length)} rule severities, 3 controls, ${String(PLUGIN_DIAGNOSTICS.length)} plugin findings at the root and in a workspace.`,
 );

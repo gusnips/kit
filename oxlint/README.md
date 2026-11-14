@@ -1,7 +1,8 @@
 # @gusnips/oxlint
 
 Two oxlint configs: `base.json` for a TypeScript repo and `react.json` for a React one. They hold
-the lint core our repos each wrote for ESLint, so a repo keeps only its own rules.
+the lint core our repos each wrote for ESLint, so a repo keeps only its own rules. A plugin with two
+more rules is there when you ask for it (see "Two rules of our own").
 
 ```bash
 bun add -d @gusnips/oxlint oxlint
@@ -66,6 +67,36 @@ Write them in your `.oxlintrc.json`, next to `extends`. Yours win.
   "overrides": [{ "files": ["**/*.test.ts"], "rules": { "typescript/no-explicit-any": "off" } }]
 }
 ```
+
+## Two rules of our own
+
+oxlint has no `no-restricted-syntax`, and our repos used it for two selectors. The plugin holds
+them as real rules. They are off until you turn them on, and oxlint still calls JS plugins alpha.
+
+- `gusnips/no-as-unknown-as` reports `value as unknown as T`. `value as unknown` and
+  `value as const` are fine.
+- `gusnips/effect-body-must-be-block` reports `useEffect(() => save(), [])`. A short arrow body
+  returns its value, and React runs that value as the cleanup. Write `useEffect(() => { save(); }, [])`.
+  `useLayoutEffect` and `useInsertionEffect` count too. An arrow that returns a function on purpose,
+  like `() => () => stop()`, is fine. `React.useEffect(...)` is not looked at, only the bare name.
+
+```json
+{
+  "extends": ["./node_modules/@gusnips/oxlint/react.json"],
+  "jsPlugins": ["@gusnips/oxlint/plugin"],
+  "rules": {
+    "gusnips/no-as-unknown-as": "error",
+    "gusnips/effect-body-must-be-block": "error"
+  },
+  "overrides": [{ "files": ["**/*.test.ts"], "rules": { "gusnips/no-as-unknown-as": "off" } }]
+}
+```
+
+In a workspace repo, oxlint looks for `@gusnips/oxlint/plugin` from the folder of the config file,
+not from the folder you run it in. So `oxlint -c ../../.oxlintrc.json` works from `apps/web` when
+`@gusnips/oxlint` is installed at the repo root, next to that config. If it is only in
+`apps/web/node_modules`, oxlint stops with "Failed to load JS plugin". Add the package to the root
+`package.json`.
 
 ## Good to know
 

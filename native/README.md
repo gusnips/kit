@@ -121,9 +121,10 @@ Five things worth knowing:
   of 48. `--rem` changes it if you really want another value.
 - **Tailwind finds your classes by itself** in the app's folder. Tailwind v4 has no `--content`
   flag. For a file outside the folder, add an `@source` line to `global.css`.
-- **Pin lightningcss to 1.30.1, or use a version after 1.30.2.** 1.30.2 breaks react-native-css's
-  compiler, and react-native-css's own check for it is swallowed by an empty `catch`. The build
-  refuses 1.30.2 instead. Pin it with `"overrides": { "lightningcss": "1.30.1" }` in the root
+- **Pin lightningcss to exactly 1.30.1.** react-native-css 3.0.7's compiler breaks on 1.30.2, and
+  an app measured 1.32.0 and 1.33.0 breaking it too, so no later release is known to work.
+  react-native-css's own check is swallowed by an empty `catch`, so the build refuses every
+  release after 1.30.1 instead. Pin it with `"overrides": { "lightningcss": "1.30.1" }` in the root
   `package.json`: a devDependency is not enough, because react-native-css loads the copy under
   `@expo/metro-config` first.
 - **A `className` change hot-reloads.** Only a change to `global.css` or your tokens needs the

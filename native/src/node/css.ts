@@ -172,10 +172,22 @@ function loadCompiler(fromApp: NodeRequire): Compiler {
 }
 
 /**
- * lightningcss 1.30.2 breaks react-native-css's compiler. react-native-css checks for it and means
- * to throw, but the check sits inside a `try` whose `catch` is empty, so the throw is swallowed and
- * the build goes on. This asks the same copy its loader picks: the one under `@expo/metro-config`
- * first (a peer of react-native-css, so bun installs it), then its own.
+ * Whether this lightningcss breaks react-native-css 3.0.7's compiler. 1.30.2 is the release
+ * react-native-css itself names, and an adopter's app then measured 1.32.0 and 1.33.0 failing the
+ * same way, so every release after 1.30.1 counts as broken until one is measured working.
+ */
+export function isBrokenLightningcss(version: string): boolean {
+  const [major = 0, minor = 0, patch = 0] = version.split(/[.+-]/, 3).map(Number);
+  if (major !== 1) return major > 1;
+  if (minor !== 30) return minor > 30;
+  return patch > 1;
+}
+
+/**
+ * react-native-css checks for a broken lightningcss and means to throw, but the check sits inside a
+ * `try` whose `catch` is empty, so the throw is swallowed and the build goes on. This asks the same
+ * copy its loader picks: the one under `@expo/metro-config` first (a peer of react-native-css, so
+ * bun installs it), then its own.
  *
  * That order is also why a devDependency on lightningcss does not fix it. Pin it with `overrides`
  * in the root `package.json`, which reaches every copy.
@@ -197,10 +209,11 @@ function refuseBrokenLightningcss(fromApp: NodeRequire): void {
     } catch {
       continue;
     }
-    if (version === "1.30.2")
+    if (isBrokenLightningcss(version))
       throw new Error(
-        "lightningcss 1.30.2 breaks react-native-css's compiler. Pin it to 1.30.1 with " +
-          '"overrides": { "lightningcss": "1.30.1" } in the root package.json, or move to a newer one.',
+        `lightningcss ${version} breaks react-native-css's compiler (every release after 1.30.1 ` +
+          'measured so far does). Pin it with "overrides": { "lightningcss": "1.30.1" } in the root ' +
+          "package.json, then run bun install.",
       );
     return;
   }

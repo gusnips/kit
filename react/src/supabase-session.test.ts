@@ -1,5 +1,7 @@
 import {
   AuthApiError,
+  AuthImplicitGrantRedirectError,
+  AuthPKCEGrantCodeExchangeError,
   AuthRefreshDiscardedError,
   AuthRetryableFetchError,
   AuthUnknownError,
@@ -458,6 +460,27 @@ describe("isAuthOutage", () => {
     // for. (With a body that is not JSON they arrive with no status at all: see below.)
     expect(isAuthOutage(new AuthApiError("Insufficient Storage", 507, undefined))).toBe(true);
     expect(isAuthOutage(new AuthApiError("Network Connect Timeout", 599, undefined))).toBe(true);
+  });
+
+  it("reads auth-js's own callback URL errors as answers, despite their 500", () => {
+    // Built by auth-js itself while it reads a sign-in's callback URL, with 500 written into the
+    // class. The URL said the person denied consent, the link is spent, or there is no code: a
+    // retry re-reads the same URL, so "try again" there is a dead end.
+    const denied = new AuthImplicitGrantRedirectError("access_denied", {
+      error: "access_denied",
+      code: "access_denied",
+    });
+    const noCode = new AuthPKCEGrantCodeExchangeError("No code detected.");
+    expect([denied.status, noCode.status]).toEqual([500, 500]);
+    expect(isAuthOutage(denied)).toBe(false);
+    expect(isAuthOutage(noCode)).toBe(false);
+  });
+
+  it("gives an error from outside auth-js the benefit of the doubt", () => {
+    // auth-js returns its refusals, so this only ever arrives from a `catch`: something under the
+    // call broke, and nothing was said about the session. On a client that decides whether to sign
+    // someone out, the doubt keeps them signed in. The server copy answers false on purpose.
+    expect(isAuthOutage(new Error("storage is locked"))).toBe(true);
   });
 
   it("reads nothing-went-wrong as nothing went wrong", () => {

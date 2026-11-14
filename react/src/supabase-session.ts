@@ -72,9 +72,22 @@ type _StorageFitsCreateClient = Satisfied<
  * Read the version a tree really serves with `bun why @supabase/auth-js`, which prints one
  * heading per RESOLVED version; `node_modules` keeps copies the resolver does not serve.
  *
+ * Two auth errors carry a 500 and are answers all the same: `AuthImplicitGrantRedirectError` and
+ * `AuthPKCEGrantCodeExchangeError`. auth-js builds both itself, with the status written into the
+ * class, while it reads a sign-in's callback URL and before it sends anything: the URL carries the
+ * provider's own error (the person denied consent, the link is spent), the flow in the URL is not the
+ * client's, or the code is missing. Measured at 2.119.0, in `_getSessionFromURL`. Read as an outage,
+ * a spent link was offered "try again", and trying again re-reads the same dead URL. They are
+ * matched by name, the way auth-js's own `isAuthImplicitGrantRedirectError` matches, so two copies
+ * of the SDK in one tree still agree.
+ *
  * Anything that is not an auth error at all answers true: a failure from outside auth-js is not a
- * verdict on the credential either. Nothing at all answers false. `null` is what every supabase-js
- * auth call returns on success, and success is not an outage.
+ * verdict on the credential either, and for a client deciding whether to end a session, the doubt
+ * goes to keeping it. auth-js RETURNS its refusals and throws only when something under it broke, so
+ * a non-auth error here came from a `catch`, never from an `{ error }`. A server reading the same
+ * `catch` around a database lookup wants the opposite answer, which is why
+ * `@gusnips/server/supabase` has its own copy that answers false. Nothing at all answers false.
+ * `null` is what every supabase-js auth call returns on success, and success is not an outage.
  */
 export function isAuthOutage(error: unknown): boolean {
   // Nothing thrown is not an outage, and this clause exists because the function is exported.
@@ -84,8 +97,15 @@ export function isAuthOutage(error: unknown): boolean {
   // site, which is what a check missing from in here looks like from the outside.
   if (error == null) return false;
   if (!isAuthError(error)) return true;
+  if (CALLBACK_URL_ANSWERS.has(error.name)) return false;
   return isAuthRetryableFetchError(error) || (error.status ?? 0) >= 500;
 }
+
+/** The two 500s auth-js raises on its own while reading a callback URL. See {@link isAuthOutage}. */
+const CALLBACK_URL_ANSWERS: ReadonlySet<string> = new Set([
+  "AuthImplicitGrantRedirectError",
+  "AuthPKCEGrantCodeExchangeError",
+]);
 
 function reachedAuth(error: unknown): boolean {
   // Measured across the fleet: four backends answered 401 to their own auth provider's 500,

@@ -78,6 +78,19 @@ It is safe to hand it the `error` from a `{ data, error }` result without checki
 `null` answers false. That is worth stating because `null` is the SUCCESS value of every
 supabase-js auth call, so the obvious `if (isAuthOutage(error))` is written against it constantly.
 
+Two errors carry a 500 and still answer false: `AuthImplicitGrantRedirectError` and
+`AuthPKCEGrantCodeExchangeError`. auth-js raises both itself while it reads a callback URL, before
+it sends anything, when the URL says the person denied consent, the link is spent, or there is no
+code. Trying again reads the same URL, so they are answers, not an outage.
+
+An error that does not come from auth-js answers **true**. auth-js returns its refusals in
+`{ error }` and throws only when something under it broke, so such an error can only come from a
+`catch`, and it says nothing about the session. On a browser or a phone, where this decides whether
+someone is signed out, the doubt keeps them signed in. A server asks the same question about a
+`catch` around its own database lookup, where that error is not auth failing at all, so
+`isAuthOutage` from `@gusnips/server/supabase` answers false there. If you keep one copy for both
+sides of an app, it can only be right for one of them: take each side's from its package.
+
 A sign-out that cannot reach auth leaves the person signed in. When the token has expired and the
 network is down, `auth.signOut()` returns an error and keeps the stored session. That held on every
 auth-js version measured, 2.106.2 to 2.117.2, and before 2.110.2 it does the same with a good

@@ -600,6 +600,17 @@ pin them; if one fails, a lesson is being un-learned.
    is not an `AuthError` is a fetch `TypeError` or a CORS refusal — not auth answering, so `true`.
    On a server the same `catch` wraps a database lookup, where a driver error is not an auth
    outage, so `false`. One name, two call sites, two correct answers; do not "reconcile" them.
+   The first adopter to move its phone app onto the kit kept its own copy outside the adapter,
+   because the kit's answered `true` for such an error and its own answered `false`: the server's
+   answer, carried into its clients. The client copy stays `true`, and its README now says why
+   the two differ.
+
+   **And a 500 is not always auth failing.** `AuthImplicitGrantRedirectError` and
+   `AuthPKCEGrantCodeExchangeError` are built by auth-js itself with 500 written into the class,
+   while it reads a callback URL and before it sends anything (`_getSessionFromURL`, read at
+   2.119.0): the URL carries the provider's refusal, a flow mismatch, or no code. The client copy
+   read them as an outage and offered "try again" over a spent link; it now answers false for both,
+   by name. The same adopter had found it first.
 
    **The same clause is wrong one step later, at the sentence.** "Check your connection" is true
    of a request that never landed and false of a 5xx, which is ours. auth-js marks "nothing came

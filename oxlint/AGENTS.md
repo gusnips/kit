@@ -2,11 +2,12 @@ Rules for `@gusnips/oxlint`. The repo-wide rules are in the root `AGENTS.md`.
 
 # What the presets are, measured
 
-Two JSON files and no code. They are the lint core every app repeated in its ESLint config
-(`js` and `typescript-eslint` `recommended`, `no-explicit-any`, `no-unused-vars` with `^_`,
-`no-undef` off, `eslint-plugin-react-hooks` 7), written once for oxlint. Anything a repo wrote for
-itself (`no-restricted-imports`, `no-restricted-syntax`, `no-console`, type-aware rules) stays out.
-A rule goes in only when most repos had it.
+Two JSON files and one plugin file. The JSON files are the lint core every app repeated in its
+ESLint config (`js` and `typescript-eslint` `recommended`, `no-explicit-any`, `no-unused-vars` with
+`^_`, `no-undef` off, `eslint-plugin-react-hooks` 7), written once for oxlint. Anything a repo wrote
+for itself (`no-restricted-imports`, `no-console`, type-aware rules) stays out. A rule goes in only
+when most repos had it. The plugin (`plugin.js`, exported as `@gusnips/oxlint/plugin`) is the one
+exception, see below.
 
 Read on oxlint 1.93.0, 2026-11-13:
 
@@ -24,6 +25,44 @@ Read on oxlint 1.93.0, 2026-11-13:
   `scripts/check-preset.ts` runs the installed oxlint over a fixture, compares every diagnostic,
   reads the React rule levels back with `--print-config`, and runs the same fixture through a preset
   with its rules deleted, which must NOT match.
+
+# The plugin: the two `no-restricted-syntax` selectors
+
+oxlint 1.93.0 has no `no-restricted-syntax`. 8 repos wrote the same two selectors with it (read from
+their ESLint configs on 2026-11-14), so `plugin.js` holds them as rules, plugin name `gusnips`:
+
+- `no-as-unknown-as`: `TSAsExpression > TSAsExpression.expression[typeAnnotation.type="TSUnknownKeyword"]`.
+  Reported on the inner `x as unknown`.
+- `effect-body-must-be-block`:
+  `CallExpression[callee.name=/^use(Layout|Insertion)?Effect$/] > ArrowFunctionExpression[body.type!="BlockStatement"][body.type!="ArrowFunctionExpression"][body.type!="FunctionExpression"]`.
+  Reported on the arrow. `React.useEffect(...)` is not matched, because the selector reads
+  `callee.name` and a member expression has none. Keep it that way: a rule that is wider than the
+  selector would report lines the repos never saw.
+
+The presets do not enable them. A repo opts in with `jsPlugins` and `rules`, and turns
+`no-as-unknown-as` off for tests with an `overrides` entry (measured: a plugin rule goes off in
+`overrides` like any other).
+
+Read on oxlint 1.93.0, 2026-11-14:
+
+- A `jsPlugins` entry that is a package name resolves from the folder of the config file that lists
+  it, not from the working directory. It works from a nested workspace (`oxlint -c ../../.oxlintrc.json`
+  run in `apps/web`) when the package is in the `node_modules` next to the config. With the config at
+  the root and the package only in `apps/web/node_modules`, oxlint fails with "Failed to load JS
+  plugin ... Cannot find module". A config placed next to the workspace works too.
+- An ESLint-style `create(context)` with `context.report({ node, messageId })` works as is.
+- Same lines and columns as ESLint's `no-restricted-syntax` over the same fixture: 7 findings, ESLint
+  9.39.5 with typescript-eslint 8.72.2 on TypeScript 5.9.3 against oxlint 1.93.0. The fixture is in
+  `scripts/check-preset.ts`. Kit has no ESLint any more, so that run was done once in a scratch
+  install. Repeat it when a rule changes: copy the fixture files out, run ESLint with the two selectors
+  as `no-restricted-syntax` options, and compare `file:line:column`.
+- A fixture line that starts with `as` is a parse error: TypeScript does not read `as` as an operator
+  after a line break, so the whole file is skipped and the findings go missing without a failure.
+  `scripts/check-preset.ts` lists exact findings, so it would catch that.
+
+`bun run test` checks the plugin the same way as the presets: exact findings from the repo root and
+from inside a workspace, the presets alone report nothing, and a plugin with its rules deleted must
+NOT match.
 
 # Where oxlint and the ESLint plugin differ
 

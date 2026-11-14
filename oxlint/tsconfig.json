@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // The package is two JSON files. This config covers `scripts/` only, which runs the installed
+    // oxlint over a fixture, so it is the one place here that sees Node.
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["scripts/**/*"],
+  "exclude": ["node_modules"]
+}

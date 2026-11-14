@@ -2,8 +2,8 @@ Entry point for AI agents working on this repo.
 
 # kit
 
-**The layer under a TypeScript app, in ten packages.** Seven sit under a Vite + React SPA and three
-under a Bun or Node server on Postgres. They share one repo because the server packages use
+**The layer under a TypeScript app, in eleven packages.** Seven sit under a Vite + React SPA, three
+under a Bun or Node server on Postgres, and one is the lint config both share. They share one repo because the server packages use
 `@gusnips/http` too: a change to the envelope lands on both sides in one pull request, and
 `server` and `sdkgen` build against the `http` beside them, not the one on npm.
 
@@ -20,6 +20,7 @@ folder you change.
 | ------------------- | ---------------------------------------------------------------------- |
 | `react/AGENTS.md`   | frontend invariants 16 to 21, for anything under `react/src/ui/`       |
 | `tokens/AGENTS.md`  | the token contract, measured                                           |
+| `oxlint/AGENTS.md`  | what the oxlint presets hold, and where oxlint and ESLint differ       |
 | `migrate/AGENTS.md` | server invariants 1 to 20, the SSL helper, and what the build measured |
 | `server/AGENTS.md`  | server invariants 21 to 52, and 57                                     |
 | `sdkgen/AGENTS.md`  | server invariants 53 to 56                                             |
@@ -79,6 +80,7 @@ kit/                    ← repo root (this folder), git root
 │   └── src/ui/         ← the seven Base UI wrappers, behind a subpath (see below)
 ├── vite/               ← @gusnips/vite: the build rig. The ONLY frontend package allowed node:fs.
 ├── migrate/ sdkgen/ server/ ← the server packages, laid out under "The server packages"
+├── oxlint/             ← @gusnips/oxlint: two oxlint configs, base.json and react.json. No code, one check script.
 ├── scripts/            ← check-purity.ts, check-exports.ts and check-release.ts, the guards
 ├── MIGRATIONS.md       ← what moving each app onto the frontend packages taught
 └── AGENTS.md           ← this file
@@ -313,7 +315,7 @@ Tests do not run in CI (the fleet's CI minutes policy). Run them before every co
 - **`bun run release:check` packs each package and reads the manifest that comes out.** It is the
   only thing here that looks at what the registry will actually receive, and the only reason the
   bug above is a caught error rather than a broken tarball.
-- **Publish in dependency order** (`tokens`, `http`, `locale`, `br`, `cnpj`, `react`, `vite`, then `migrate`, `sdkgen`, `server`), and bump `vite` whenever
+- **Publish in dependency order** (`tokens`, `http`, `locale`, `br`, `cnpj`, `react`, `vite`, then `migrate`, `sdkgen`, `server`; `oxlint` depends on none of them and goes whenever), and bump `vite` whenever
   `react` ships, because the pin inside it changed even when none of its own code did.
 - **And the adopter's half of that pin: the two carets move together, or the install grows a second
   copy of `react`.** That exact pin inside `vite` is reachable through the ADOPTER's `vite` caret,

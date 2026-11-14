@@ -41,6 +41,7 @@ const ROOT = join(fileURLToPath(import.meta.url), "..", "..");
 // Dependency order, the order a release publishes them in.
 const PACKAGES = [
   "tokens",
+  "oxlint",
   "http",
   "locale",
   "br",

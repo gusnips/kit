@@ -8,6 +8,7 @@
   },
   "workspaces": [
     "tokens",
+    "oxlint",
     "http",
     "locale",
     "br",
@@ -22,7 +23,7 @@
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
     "typecheck": "bun run --filter '*' typecheck && tsc -p tsconfig.scripts.json",
-    "lint": "eslint tokens http locale br cnpj react vite migrate sdkgen server scripts",
+    "lint": "eslint tokens oxlint http locale br cnpj react vite migrate sdkgen server scripts",
     "purity": "bun run scripts/check-purity.ts && bun run --filter '@gusnips/server' purity",
     "exports": "bun run scripts/check-exports.ts",
     "release:check": "bun run scripts/check-release.ts",

@@ -13,6 +13,7 @@ tokens/.compile-check
 # The READMEs are NOT here: each package has its own, committed, because they are what npm
 # shows and a reader landing on @gusnips/tokens needs a CSS import, not `bun add @gusnips/react`.
 tokens/LICENSE
+oxlint/LICENSE
 http/LICENSE
 locale/LICENSE
 br/LICENSE

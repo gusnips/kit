@@ -57,6 +57,7 @@ const PACKAGES: Record<string, Rule[]> = {
   // tokens/ too, and for a different reason worth saying rather than leaving as a gap in a map:
   // it ships no JavaScript at all, so its only `.ts` is the build-time Tailwind compile check,
   // which is a script and reads files by design.
+  // oxlint/ ships two JSON files, and its only `.ts` is the check that runs oxlint over a fixture.
 };
 
 const TEST_FILE = /(?:^|\/)(?:__tests__\/|[^/]+\.test\.tsx?$)/;

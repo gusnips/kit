@@ -1,0 +1,57 @@
+{
+  "name": "@gusnips/oxlint",
+  "version": "0.1.0",
+  "description": "One oxlint config for a TypeScript repo, and one for a React repo. Rules go on top of it in the repo's own .oxlintrc.json.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Gustavo Salomé",
+  "homepage": "https://github.com/gusnips/kit/tree/main/oxlint#readme",
+  "bugs": {
+    "url": "https://github.com/gusnips/kit/issues"
+  },
+  "exports": {
+    "./base.json": "./base.json",
+    "./react.json": "./react.json"
+  },
+  "files": [
+    "base.json",
+    "react.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "oxlint",
+    "lint",
+    "typescript",
+    "react",
+    "react-hooks",
+    "config"
+  ],
+  "peerDependencies": {
+    "oxlint": "^1.93.0"
+  },
+  "scripts": {
+    "build": "bun run scripts/check-preset.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun run scripts/check-preset.ts",
+    "lint": "eslint scripts",
+    "sync:docs": "cp ../LICENSE .",
+    "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run sync:docs",
+    "release:patch": "bun pm version patch && bun publish --access public",
+    "release:minor": "bun pm version minor && bun publish --access public",
+    "release:major": "bun pm version major && bun publish --access public"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "oxlint": "1.93.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gusnips/kit.git",
+    "directory": "oxlint"
+  }
+}

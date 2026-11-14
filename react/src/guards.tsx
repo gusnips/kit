@@ -41,7 +41,9 @@ export interface SessionState {
  * an app on SWR or a plain `useState` still answers it in three lines.
  */
 export type MeQuery<TMe> =
-  { status: "pending" } | { status: "error"; error: unknown } | { status: "success"; data: TMe };
+  | { status: "pending" }
+  | { status: "error"; error: unknown }
+  | { status: "success"; data: TMe };
 
 /**
  * The paragraph above, pinned so it cannot quietly stop being true. A renamed state or a newly

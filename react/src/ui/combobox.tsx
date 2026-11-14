@@ -39,7 +39,8 @@ export function comboboxInputValue<T>(
 
 /** Pass text for the loading state. There is no default text or English fallback. */
 type ComboboxLoadingState =
-  { loading: boolean; loadingHint: ReactNode } | { loading?: undefined; loadingHint?: undefined };
+  | { loading: boolean; loadingHint: ReactNode }
+  | { loading?: undefined; loadingHint?: undefined };
 
 export type ComboboxProps<T> = Omit<
   Primitive.Root.Props<T, false, T>,

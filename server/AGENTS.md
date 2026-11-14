@@ -257,7 +257,7 @@ and the others did not. The tests pin them.
     comments differed, and they differed about WHY Supabase cloud goes unverified. The pool
     **singleton**: every copy wrapped one in a module-level `let`, and a package that holds it
     decides when your process can exit. `connectWithRetry`: four copies, and its `maxAttempts =
-Infinity` default turns a typo'd `DATABASE_URL` into a boot that hangs instead of one that
+    Infinity` default turns a typo'd `DATABASE_URL` into a boot that hangs instead of one that
     fails. Type parsers: a global side effect on the `pg` module, and a product decision about
     what a `numeric` column means.
 
@@ -340,7 +340,7 @@ Infinity` default turns a typo'd `DATABASE_URL` into a boot that hangs instead o
     ioredis 5.10.1, the version the whole fleet runs, under bun 1.3.8 and node 22: the process
     survives and `uncaughtException` never fires.** `silentEmit` in `Redis.js` checks
     `this.listeners(eventName).length` and, finding none, calls `console.error("[ioredis]
-Unhandled error event:", ...)` and returns — it never emits, so Node's throw is unreachable by
+    Unhandled error event:", ...)` and returns — it never emits, so Node's throw is unreachable by
     construction.
 
     `onError` stays required for the reason that survives: that `console.error` is a bare stack on

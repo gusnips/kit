@@ -64,8 +64,7 @@ asks it:
 import { isAuthOutage } from "@gusnips/react/supabase";
 
 // A callback that just failed to trade its one-use link.
-if (isAuthOutage(error))
-  showRetry(); // the link was never spent: the same one still works
+if (isAuthOutage(error)) showRetry(); // the link was never spent: the same one still works
 else showLinkSpent(); // auth said no: only a new link helps
 ```
 

@@ -84,7 +84,8 @@ export interface ValidationIssue {
 }
 
 export type ApiResponse<T, Code extends string = string, M = PaginationMeta> =
-  ApiSuccess<T, M> | ApiErrorBody<Code>;
+  | ApiSuccess<T, M>
+  | ApiErrorBody<Code>;
 
 /** True when a parsed body is the error half of the envelope. */
 export function isApiError<Code extends string>(body: unknown): body is ApiErrorBody<Code> {

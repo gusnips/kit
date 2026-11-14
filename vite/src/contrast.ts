@@ -68,7 +68,15 @@ export interface CheckContrastOptions {
 }
 
 export type ContrastRule =
-  "load" | "floor" | "retune" | "rebind" | "untokened" | "hover" | "dead" | "missing" | "mirror";
+  | "load"
+  | "floor"
+  | "retune"
+  | "rebind"
+  | "untokened"
+  | "hover"
+  | "dead"
+  | "missing"
+  | "mirror";
 
 export interface ContrastProblem {
   rule: ContrastRule;

@@ -1232,7 +1232,7 @@ app.use(
   that also answers on its public interface cannot be handed a made-up address. `X-Real-IP` is
   never read: by its documented default, Caddy passes a client's own copy through.
 - **On a Worker or on Fly**, pass the edge's header instead: `clientIp({ header:
-"cf-connecting-ip" })`. Not on a box behind a proxied Cloudflare record, where anyone who finds
+  "cf-connecting-ip" })`. Not on a box behind a proxied Cloudflare record, where anyone who finds
   the box's address can send that header too.
 - **`null` when no address can be trusted**, never `"unknown"`. A shared `"unknown"` window is one
   any caller can fill for everyone. A `key` of `null` lets the request through uncounted; write

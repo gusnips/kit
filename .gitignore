@@ -2,9 +2,6 @@ node_modules
 dist
 *.tsbuildinfo
 .DS_Store
-# Prettier cache (format:check --cache).
-.cache/
-
 # The token compile check builds here. Cleared on success, kept on failure so the CSS
 # that broke is there to read.
 tokens/.compile-check

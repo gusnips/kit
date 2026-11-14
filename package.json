@@ -27,14 +27,14 @@
     "purity": "bun run scripts/check-purity.ts && bun run --filter '@gusnips/server' purity",
     "exports": "bun run scripts/check-exports.ts",
     "release:check": "bun run scripts/check-release.ts",
-    "format": "prettier --write .",
-    "format:check": "prettier --check . --cache --cache-strategy content --cache-location .cache/prettier-cache",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "check": "bun run format:check && bun run build && bun run lint && bun run typecheck && bun run purity && bun run exports && bun run test"
   },
   "devDependencies": {
     "@types/node": "^24.12.0",
+    "oxfmt": "0.78.0",
     "oxlint": "1.93.0",
-    "prettier": "^3.4.2",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   }

@@ -6,8 +6,9 @@
  * It lives in `src/node/` because APNs speaks HTTP/2 only, and `fetch` gives no way to ask for it.
  */
 import http2 from "node:http2";
+import { attemptOf, failedSend } from "./attempt.ts";
 import { jwtSigner } from "./jwt.ts";
-import type { PushMessage, PushSendResult, PushTransport } from "./types.ts";
+import type { PushAttempt, PushMessage, PushSendResult, PushTransport } from "./types.ts";
 
 export interface ApnsConfig {
   /** The APNs auth key: the contents of the .p8 file Apple gave you, a PKCS #8 PEM. */
@@ -34,8 +35,8 @@ type Environment = keyof typeof ORIGIN;
 const TOKEN_TTL_MS = 50 * 60 * 1000;
 const TIMEOUT_MS = 10_000;
 
-/** One try: what the push did, or "this token belongs to the other environment". */
-export type ApnsAttempt = PushSendResult | { status: "wrong-environment" };
+/** What one request said: what the push did, or "this token belongs to the other environment". */
+export type ApnsAnswer = PushSendResult | { status: "wrong-environment" };
 
 /**
  * What one APNs answer means for the token. Only two answers remove it: a 410, and a token both
@@ -46,7 +47,7 @@ export type ApnsAttempt = PushSendResult | { status: "wrong-environment" };
  * registration over one typo, which only each person opening the app again can undo. Apple's docs
  * tie an inactive token to 410. The cost: a token from another app's build fails every send.
  */
-export function apnsAttempt(status: number, body: string): ApnsAttempt {
+export function apnsAnswer(status: number, body: string): ApnsAnswer {
   if (status === 200) return { status: "sent" };
   if (status === 410) return { status: "unregistered" };
   const reason = reasonOf(body);
@@ -113,14 +114,25 @@ export function createApnsTransport(config: ApnsConfig): PushTransport {
     return session;
   }
 
+  /** One request: what APNs said, and the attempt it was. */
   function post(
     environment: Environment,
     bearer: string,
     message: PushMessage,
     payload: string,
-  ): Promise<ApnsAttempt> {
-    // `resolve` keeps the first answer and ignores the rest, so a timeout and a late `end` agree.
+  ): Promise<{ answer: ApnsAnswer; attempt: PushAttempt }> {
+    const startedAt = Date.now();
     return new Promise((resolve) => {
+      let status = 0;
+      // `resolve` keeps the first answer and ignores the rest, so a timeout and a late `end` agree.
+      const settle = (answer: ApnsAnswer) =>
+        resolve({
+          answer,
+          attempt: attemptOf(answer, startedAt, {
+            environment,
+            ...(status ? { httpStatus: status } : {}),
+          }),
+        });
       const session = sessionFor(environment);
       const stream = session.request({
         ":method": "POST",
@@ -133,7 +145,6 @@ export function createApnsTransport(config: ApnsConfig): PushTransport {
         "apns-priority": "10",
         "content-type": "application/json",
       });
-      let status = 0;
       let body = "";
       stream.setEncoding("utf8");
       stream.setTimeout(TIMEOUT_MS, () => {
@@ -142,7 +153,7 @@ export function createApnsTransport(config: ApnsConfig): PushTransport {
         // without this every later send would wait its 10 seconds on the same dead socket.
         // ponytail: other sends on this connection fail with it; they were waiting on it too.
         session.destroy();
-        resolve({ status: "failed", reason: "timeout" });
+        settle({ status: "failed", reason: "timeout" });
       });
       stream.on("response", (headers) => {
         status = Number(headers[":status"] ?? 0);
@@ -150,19 +161,20 @@ export function createApnsTransport(config: ApnsConfig): PushTransport {
       stream.on("data", (chunk: string) => {
         body += chunk;
       });
-      stream.on("error", (error) => resolve({ status: "failed", reason: error.message }));
-      stream.on("end", () => resolve(apnsAttempt(status, body)));
+      stream.on("error", (error) => settle({ status: "failed", reason: error.message }));
+      stream.on("end", () => settle(apnsAnswer(status, body)));
       stream.end(payload);
     });
   }
 
   return {
     async send(message) {
+      const startedAt = Date.now();
       let bearer: string;
       try {
         bearer = await providerToken();
       } catch (error) {
-        return { status: "failed", reason: `provider token: ${String(error)}` };
+        return failedSend(`provider token: ${String(error)}`, startedAt);
       }
       const { title, body, data, badge } = message;
       const payload = JSON.stringify({
@@ -181,11 +193,15 @@ export function createApnsTransport(config: ApnsConfig): PushTransport {
         // ponytail: a debug device costs one extra request per push. If that matters, store the
         // environment that answered beside the token.
         const production = await post("production", bearer, message, payload);
-        if (production.status !== "wrong-environment") return production;
+        if (production.answer.status !== "wrong-environment")
+          return { ...production.answer, attempts: [production.attempt] };
         const sandbox = await post("sandbox", bearer, message, payload);
-        return sandbox.status === "wrong-environment" ? { status: "unregistered" } : sandbox;
+        const attempts = [production.attempt, sandbox.attempt];
+        return sandbox.answer.status === "wrong-environment"
+          ? { status: "unregistered", attempts }
+          : { ...sandbox.answer, attempts };
       } catch (error) {
-        return { status: "failed", reason: String(error) };
+        return failedSend(String(error), startedAt);
       }
     },
   };

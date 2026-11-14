@@ -937,3 +937,15 @@ and the others did not. The tests pin them.
     Nine planted defects (each removal rule widened, no sandbox, a token per send, no listener,
     no single-flight exchange, a throw let through, an Android token sent through APNs) each
     failed the suite, with a green control.
+
+    **`onAttempt` reports each request, after the removal, with no token (0.17.0).** The first
+    adopter's move lost two traces: one span per APNs request (environment, status, duration) and
+    the token's removal on the span per device. The kit has no tracing, so the transports return
+    what they did as `attempts` beside the answer, and the notifier hands each one to the hook.
+    It runs after the removal, because only then can the last request say `tokenRemoved`, so each
+    event carries `startedAt` for a span drawn after the fact. No token and no hash: a hash is one
+    id per phone in every trace. The hook is never awaited, and a throw or a rejection is logged
+    and dropped. `PushAttempt` is a type, not an interface, so it passes as a log line's meta or a
+    span's attributes. Eight planted defects (each catch removed, `tokenRemoved` on every request
+    or before the removal, only the last request reported, the token in the event, the sandbox
+    request dropped, no attempt for a transport that counts none) each failed the suite.

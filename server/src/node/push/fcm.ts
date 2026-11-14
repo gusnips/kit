@@ -5,6 +5,7 @@
  * One file holds both credentials: a Firebase service account's JSON carries the project id, the
  * account's address and its RSA key.
  */
+import { attemptOf, failedSend } from "./attempt.ts";
 import { jwtSigner } from "./jwt.ts";
 import type { PushSendResult, PushTransport } from "./types.ts";
 
@@ -55,11 +56,12 @@ export function createFcmTransport(config: FcmConfig): PushTransport {
 
   return {
     async send(message) {
+      const startedAt = Date.now();
       let bearer: string;
       try {
         bearer = await accessToken();
       } catch (error) {
-        return { status: "failed", reason: `access token: ${String(error)}` };
+        return failedSend(`access token: ${String(error)}`, startedAt);
       }
       try {
         const response = await fetch(url, {
@@ -82,9 +84,13 @@ export function createFcmTransport(config: FcmConfig): PushTransport {
           }),
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
-        return fcmResult(response.status, await response.text());
+        const result = fcmResult(response.status, await response.text());
+        return {
+          ...result,
+          attempts: [attemptOf(result, startedAt, { httpStatus: response.status })],
+        };
       } catch (error) {
-        return { status: "failed", reason: String(error) };
+        return failedSend(String(error), startedAt);
       }
     },
   };

@@ -2,7 +2,8 @@ import http2 from "node:http2";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApnsTransport, createFcmTransport, createPushNotifier } from "./index.ts";
-import type { ApnsConfig, PushDevice, PushMessage } from "./index.ts";
+import type { ApnsConfig, PushAttemptEvent, PushDevice, PushMessage } from "./index.ts";
+import { createLogger } from "../../logger/index.ts";
 import { fcmResult } from "./fcm.ts";
 
 const PRODUCTION = "https://api.push.apple.com";
@@ -11,6 +12,8 @@ const SANDBOX = "https://api.sandbox.push.apple.com";
 const realConnect = http2.connect;
 
 const message: PushMessage = { token: "abc123", title: "Ready", body: "Your report is in" };
+/** The two timing fields every attempt carries. */
+const timed = { startedAt: expect.any(Number), durationMs: expect.any(Number) };
 
 async function exported(privateKey: Parameters<typeof crypto.subtle.exportKey>[1]) {
   const der = Buffer.from(await crypto.subtle.exportKey("pkcs8", privateKey)).toString("base64");
@@ -140,7 +143,10 @@ describe("createApnsTransport", () => {
       data: { screen: "report", aps: "x" },
     });
 
-    expect(result).toEqual({ status: "sent" });
+    expect(result).toEqual({
+      status: "sent",
+      attempts: [{ environment: "production", httpStatus: 200, result: "sent", ...timed }],
+    });
     expect(seen.map((request) => request.origin)).toEqual([PRODUCTION]);
     const { headers, body } = seen[0]!;
     expect(headers).toMatchObject({
@@ -171,24 +177,24 @@ describe("createApnsTransport", () => {
       [PRODUCTION]: { status: 400, reason: "BadDeviceToken" },
       [SANDBOX]: { status: 200 },
     });
-    expect(await apns().send(message)).toEqual({ status: "sent" });
+    expect(await apns().send(message)).toMatchObject({ status: "sent" });
     expect(seen.map((request) => request.origin)).toEqual([PRODUCTION, SANDBOX]);
 
     await fakeApple({
       [PRODUCTION]: { status: 400, reason: "BadDeviceToken" },
       [SANDBOX]: { status: 400, reason: "BadDeviceToken" },
     });
-    expect(await apns().send(message)).toEqual({ status: "unregistered" });
+    expect(await apns().send(message)).toMatchObject({ status: "unregistered" });
   });
 
   it("calls a 410 dead without asking sandbox, and keeps a token Apple says is for another app", async () => {
     const gone = await fakeApple({ [PRODUCTION]: { status: 410, reason: "Unregistered" } });
-    expect(await apns().send(message)).toEqual({ status: "unregistered" });
+    expect(await apns().send(message)).toMatchObject({ status: "unregistered" });
     expect(gone.map((request) => request.origin)).toEqual([PRODUCTION]);
 
     // A wrong bundleId can draw this for every device, so it must not remove them all.
     await fakeApple({ [PRODUCTION]: { status: 400, reason: "DeviceTokenNotForTopic" } });
-    expect(await apns().send(message)).toEqual({
+    expect(await apns().send(message)).toMatchObject({
       status: "failed",
       reason: "400 DeviceTokenNotForTopic",
     });
@@ -198,13 +204,18 @@ describe("createApnsTransport", () => {
     const seen = await fakeApple({ [PRODUCTION]: { status: 200 } });
     const transport = apns();
     const burst = ["a", "b", "c", "d"].map((token) => transport.send({ ...message, token }));
-    expect(await Promise.all(burst)).toEqual(Array(4).fill({ status: "sent" }));
+    expect((await Promise.all(burst)).map((result) => result.status)).toEqual(
+      Array(4).fill("sent"),
+    );
     expect(new Set(seen.map((request) => request.headers.authorization)).size).toBe(1);
 
     const result = await apns({ privateKeyPem: "not a key" }).send(message);
-    expect(result).toMatchObject({
+    const reason = expect.stringMatching(/^provider token: /);
+    // No request went out, so the attempt names no environment and no status.
+    expect(result).toEqual({
       status: "failed",
-      reason: expect.stringMatching(/^provider token: /),
+      reason,
+      attempts: [{ result: "failed", reason, ...timed }],
     });
     expect(seen).toHaveLength(4);
   });
@@ -262,7 +273,9 @@ describe("createFcmTransport", () => {
     const burst = ["a", "b", "c"].map((token) =>
       transport.send({ ...message, token, data: { screen: "report" } }),
     );
-    expect(await Promise.all(burst)).toEqual(Array(3).fill({ status: "sent" }));
+    const results = await Promise.all(burst);
+    expect(results.map((result) => result.status)).toEqual(Array(3).fill("sent"));
+    expect(results[0]?.attempts).toEqual([{ httpStatus: 200, result: "sent", ...timed }]);
 
     const exchanges = calls.filter((call) => call.url === "https://oauth2.googleapis.com/token");
     expect(exchanges).toHaveLength(1);
@@ -291,6 +304,73 @@ describe("createFcmTransport", () => {
         android: { priority: "HIGH", notification: { default_sound: true } },
       },
     });
+  });
+});
+
+describe("onAttempt", () => {
+  function observed(removeFails = false) {
+    const events: PushAttemptEvent[] = [];
+    const removed: string[] = [];
+    const push = createPushNotifier({
+      transports: { ios: apns() },
+      devices: {
+        listForUser: async () => [{ token: "abc123", platform: "ios" }],
+        remove: async (token) => {
+          if (removeFails) throw new Error("connection refused");
+          removed.push(token);
+        },
+      },
+      logger: { warn: () => {} },
+      onAttempt: (event) => events.push(event),
+    });
+    return { push, events, removed };
+  }
+
+  it("is called once per request, the sandbox retry included", async () => {
+    await fakeApple({
+      [PRODUCTION]: { status: 400, reason: "BadDeviceToken" },
+      [SANDBOX]: { status: 200 },
+    });
+    const { push, events } = observed();
+
+    expect(await push.send("u1", { title: "Ready" })).toBe("sent");
+    expect(events).toEqual([
+      {
+        platform: "ios",
+        environment: "production",
+        httpStatus: 400,
+        result: "wrong-environment",
+        tokenRemoved: false,
+        ...timed,
+      },
+      {
+        platform: "ios",
+        environment: "sandbox",
+        httpStatus: 200,
+        result: "sent",
+        tokenRemoved: false,
+        ...timed,
+      },
+    ]);
+  });
+
+  it("says on the last request that the token was removed, and never carries the token", async () => {
+    const both = { status: 400, reason: "BadDeviceToken" };
+    await fakeApple({ [PRODUCTION]: both, [SANDBOX]: both });
+    const { push, events, removed } = observed();
+
+    expect(await push.send("u1", { title: "Ready" })).toBe("unregistered");
+    expect(removed).toEqual(["abc123"]);
+    expect(events.map(({ environment, tokenRemoved }) => ({ environment, tokenRemoved }))).toEqual([
+      { environment: "production", tokenRemoved: false },
+      { environment: "sandbox", tokenRemoved: true },
+    ]);
+    expect(JSON.stringify(events)).not.toContain("abc123");
+
+    // A removal that failed is not reported as done.
+    const stuck = observed(true);
+    expect(await stuck.push.send("u1", { title: "Ready" })).toBe("unregistered");
+    expect(stuck.events.map((event) => event.tokenRemoved)).toEqual([false, false]);
   });
 });
 
@@ -340,5 +420,32 @@ describe("README: phone push", () => {
     );
     expect(seen.map((request) => request.headers[":path"])).toEqual(["/3/device/abc123"]);
     expect(warnings).toEqual([]);
+  });
+
+  it("logs one line per request from onAttempt, with no token in it", async () => {
+    await fakeApple({
+      [PRODUCTION]: { status: 400, reason: "BadDeviceToken" },
+      [SANDBOX]: { status: 200 },
+    });
+    const lines: string[] = [];
+    const logger = createLogger({ write: (line) => lines.push(line) });
+    const transports = { ios: apns() };
+    const device: PushDevice = { token: "abc123", platform: "ios" };
+    const pushDevices = { listForUser: async () => [device], remove: async () => {} };
+
+    const push = createPushNotifier({
+      transports,
+      devices: pushDevices,
+      logger,
+      onAttempt: (attempt) => logger.info("Push request", attempt),
+    });
+
+    expect(await push.send("u1", { title: "Ready" })).toBe("sent");
+    const logged = lines.map((line) => JSON.parse(line));
+    expect(logged).toMatchObject([
+      { message: "Push request", environment: "production", result: "wrong-environment" },
+      { message: "Push request", environment: "sandbox", result: "sent" },
+    ]);
+    expect(lines.join("")).not.toContain("abc123");
   });
 });

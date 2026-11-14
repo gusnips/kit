@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createPushNotifier } from "./index.ts";
-import type { PushDevice, PushMessage, PushSendResult, PushTransport } from "./index.ts";
+import type {
+  PushAttemptEvent,
+  PushDevice,
+  PushMessage,
+  PushSendResult,
+  PushTransport,
+} from "./index.ts";
 
 const IPHONE: PushDevice = { token: "tok-iphone", platform: "ios" };
 const IPAD: PushDevice = { token: "tok-ipad", platform: "ios" };
@@ -160,5 +166,56 @@ describe("createPushNotifier", () => {
     });
     expect(await gone.send("u1", { title: "Ready" })).toBe("unregistered");
     expect(devices.removed).toEqual(["tok-iphone", "tok-ipad"]);
+  });
+});
+
+/** Throws on iOS. On Android it rejects, which must be caught, or vitest fails the run on it. */
+function failingHook(event: PushAttemptEvent): Promise<void> | undefined {
+  if (event.platform === "ios") throw new Error("exporter is down");
+  return Promise.reject(new Error("exporter is down"));
+}
+
+describe("createPushNotifier: onAttempt", () => {
+  it("keeps the push going when the hook throws or its promise rejects", async () => {
+    const ios = fakeTransport();
+    const android = fakeTransport();
+    const log = logger();
+    const push = createPushNotifier({
+      transports: { ios, android },
+      devices: deviceTable([IPHONE, PIXEL]),
+      logger: log,
+      onAttempt: failingHook,
+    });
+
+    expect(await push.send("u1", { title: "Ready" })).toBe("sent");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ios.sent).toHaveLength(1);
+    expect(android.sent).toHaveLength(1);
+    expect(log.lines.map((line) => line.message)).toEqual([
+      "Push onAttempt hook failed, and the push went on",
+      "Push onAttempt hook failed, and the push went on",
+    ]);
+  });
+
+  it("counts one attempt for a transport that reports none, and none for a missing platform", async () => {
+    const events: unknown[] = [];
+    const devices = deviceTable([IPHONE, PIXEL]);
+    const push = createPushNotifier({
+      transports: { ios: fakeTransport({ "tok-iphone": { status: "unregistered" } }) },
+      devices,
+      logger: logger(),
+      onAttempt: (event) => events.push(event),
+    });
+
+    expect(await push.send("u1", { title: "Ready" })).toBe("partial");
+    expect(events).toEqual([
+      {
+        platform: "ios",
+        result: "unregistered",
+        tokenRemoved: true,
+        startedAt: expect.any(Number),
+        durationMs: expect.any(Number),
+      },
+    ]);
   });
 });

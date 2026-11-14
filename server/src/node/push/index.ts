@@ -6,7 +6,8 @@
  * sandbox, so a debug build's token is not removed; a token removed only on an answer that proves
  * it dead; the signed tokens made once per burst, not once per device; and a send that never
  * throws, because a failed push must not cost the caller the work it was announcing. What stayed in
- * the app: the device table and its routes, push categories and preferences, and which events push.
+ * the app: the device table and its routes, push categories and preferences, which events push, and
+ * the traces and metrics, which `onAttempt` feeds with one event per request and no token.
  *
  * It lives in `src/node/` because APNs needs `node:http2`. It needs no peer.
  */
@@ -16,6 +17,7 @@ export { createFcmTransport } from "./fcm.ts";
 export type { FcmConfig } from "./fcm.ts";
 export { createPushNotifier } from "./notifier.ts";
 export type {
+  PushAttemptEvent,
   PushDevice,
   PushDeviceRepository,
   PushNotifier,
@@ -23,6 +25,7 @@ export type {
   PushOutcome,
 } from "./notifier.ts";
 export type {
+  PushAttempt,
   PushContent,
   PushMessage,
   PushPlatform,

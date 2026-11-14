@@ -2167,6 +2167,37 @@ void push.send(user.id, { title: "Your report is ready", data: { reportId } });
   A phone that signs in to another account then stops getting the first account's pushes.
 - Each request waits 10 seconds at most. `data` values are strings, and `badge` is for iOS only.
 
+### Watching each request
+
+`onAttempt` is called once for each request a transport makes, for your traces and metrics:
+
+```ts
+const push = createPushNotifier({
+  transports,
+  devices: pushDevices,
+  logger,
+  onAttempt: (attempt) => logger.info("Push request", attempt),
+});
+```
+
+- **An iPhone on a debug build makes two calls**: `environment: "production"` with
+  `result: "wrong-environment"`, then `"sandbox"`. FCM makes one call, with no `environment`.
+- **Each call says** `platform`, `httpStatus` (left out when no answer came back), `result`
+  (`sent`, `unregistered`, `failed` or `wrong-environment`), `reason` when it failed,
+  `startedAt` and `durationMs`. The request ended at `startedAt + durationMs`, so a span you draw
+  from it has its real start and end.
+- **`tokenRemoved` is true on a device's last call when that answer removed the token.** The hook
+  runs after the removal so it can say so. A removal that failed says `false`.
+- **It gets no token, not even a hash.** A hash is still one id per phone, the same in every
+  trace, and that turns your tracing backend into a list of devices. You know which person the
+  push was for: it is the `userId` you passed to `send`.
+- **A broken hook never stops a push.** The hook is never awaited, and a throw or a rejected
+  promise is written to `logger` and dropped. It runs inline, so keep it quick.
+- **`reason` is the provider's words or a network error**, and a network error can name an
+  address. Leave it out of anything you would not put an address in.
+- A device on a platform with no transport makes no request, so it makes no call. A transport of
+  your own may return `attempts` with its answer; if it does not, its whole send counts as one.
+
 ## The environment
 
 Check the environment first thing at boot. A box with a wrong `.env` then stops with a list of
@@ -2366,6 +2397,7 @@ Each of these was measured, not assumed.
 - A mail without a text part is refused.
 - A mail login is never sent over a connection without TLS.
 - A push removes a device only on an answer that proves its token dead.
+- A push's `onAttempt` hook that throws or rejects never stops the push.
 - An MCP tool handler never throws, and a tool's `.shape` does not compile.
 - A REST body that is not a JSON object is refused, never read as `{}`.
 - An API reference names the origin you configure, never the one a request came in on. A

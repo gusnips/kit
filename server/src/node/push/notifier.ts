@@ -5,7 +5,14 @@
  * are each product's policy, so the app asks those before it calls `send`.
  */
 import type { Logger } from "../../logger/index.ts";
-import type { PushContent, PushPlatform, PushSendResult, PushTransport } from "./types.ts";
+import { attemptOf, failedSend } from "./attempt.ts";
+import type {
+  PushAttempt,
+  PushContent,
+  PushPlatform,
+  PushSendResult,
+  PushTransport,
+} from "./types.ts";
 
 export interface PushDevice {
   token: string;
@@ -28,7 +35,25 @@ export interface PushNotifierOptions {
   devices: PushDeviceRepository;
   /** Required: `send` never throws, so this is the only place a failed push shows. */
   logger: Pick<Logger, "warn">;
+  /**
+   * Called once per request a transport made, for your traces and metrics: twice for an APNs
+   * token that production sent on to sandbox. A device on a platform with no transport makes no
+   * request and no call. It is called after the token is removed, so the last attempt can say so.
+   * It runs inline, so keep it quick: a promise it returns is never awaited, and a throw or a
+   * rejection is logged and dropped.
+   */
+  onAttempt?: (event: PushAttemptEvent) => void;
 }
+
+/** One request, with what the notifier knows beside it. Like `PushAttempt`, it holds no token. */
+export type PushAttemptEvent = PushAttempt & {
+  platform: PushPlatform;
+  /**
+   * True on a device's last attempt when its answer removed the token and the removal went
+   * through. False on every other attempt, and when the removal failed.
+   */
+  tokenRemoved: boolean;
+};
 
 /**
  * How one `send` went, across the person's devices.
@@ -65,33 +90,51 @@ type DeviceOutcome = PushSendResult["status"] | "unconfigured";
  *     void push.send(userId, { title: "Your report is ready", data: { reportId } });
  */
 export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
-  const { transports, devices, logger } = options;
+  const { transports, devices, logger, onAttempt } = options;
+
+  function observe(event: PushAttemptEvent): void {
+    const dropped = (error: unknown) =>
+      logger.warn("Push onAttempt hook failed, and the push went on", { error });
+    try {
+      const returned: unknown = onAttempt?.(event);
+      if (returned instanceof Promise) returned.catch(dropped);
+    } catch (error) {
+      dropped(error);
+    }
+  }
 
   async function toDevice(device: PushDevice, content: PushContent): Promise<DeviceOutcome> {
-    const transport = transports[device.platform];
+    const { platform, token } = device;
+    const transport = transports[platform];
     // No credentials for this platform: the configuration, not a failure worth a line per push.
     if (!transport) return "unconfigured";
+    const startedAt = Date.now();
     let result: PushSendResult;
     try {
-      result = await transport.send({ ...content, token: device.token });
+      result = await transport.send({ ...content, token });
+      if (result.status === "failed")
+        logger.warn("Push not delivered", { platform, reason: result.reason });
     } catch (error) {
       // A transport of the app's own may throw. One device failing must not stop the others.
-      logger.warn("Push not delivered: the transport threw", { platform: device.platform, error });
-      return "failed";
+      logger.warn("Push not delivered: the transport threw", { platform, error });
+      result = failedSend(String(error), startedAt);
     }
-    if (result.status === "failed")
-      logger.warn("Push not delivered", { platform: device.platform, reason: result.reason });
+    // A transport of the app's own may count nothing. Its send was then one attempt.
+    const attempts = result.attempts ?? [attemptOf(result, startedAt)];
+    let tokenRemoved = false;
     if (result.status === "unregistered") {
       // The only sure sign the app is gone from that phone, so it is acted on at once.
       try {
-        await devices.remove(device.token);
+        await devices.remove(token);
+        tokenRemoved = true;
       } catch (error) {
-        logger.warn("Push token is dead, and removing it failed", {
-          platform: device.platform,
-          error,
-        });
+        logger.warn("Push token is dead, and removing it failed", { platform, error });
       }
     }
+    const last = attempts.length - 1;
+    attempts.forEach((attempt, index) =>
+      observe({ ...attempt, platform, tokenRemoved: tokenRemoved && index === last }),
+    );
     return result.status;
   }
 

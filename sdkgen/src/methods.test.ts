@@ -1,8 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -370,25 +370,34 @@ describe("retrySource and transportSource", () => {
   });
 });
 
+// TypeScript 7 has no stable JS API (it lives under `typescript/unstable`), so the compiler is run
+// as the command it ships: the same `tsc` an adopter runs on the generated SDK.
+const TSC = fileURLToPath(new URL("../node_modules/.bin/tsc", import.meta.url));
+
 /** The type errors in `file` and what it imports, under strict settings plus `options`. */
-function typeErrors(file: string, options: ts.CompilerOptions): string[] {
-  const program = ts.createProgram([file], {
-    target: ts.ScriptTarget.ESNext,
-    module: ts.ModuleKind.Preserve,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: true,
-    noUncheckedIndexedAccess: true,
-    verbatimModuleSyntax: true,
-    allowImportingTsExtensions: true,
-    noEmit: true,
-    skipLibCheck: true,
-    ...options,
-  });
-  return ts
-    .getPreEmitDiagnostics(program)
-    .map(
-      (d) => `${d.file?.fileName ?? ""}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`,
-    );
+function typeErrors(file: string, options: Record<string, unknown>): string[] {
+  const project = join(dirname(file), "tsconfig.json");
+  writeFileSync(
+    project,
+    JSON.stringify({
+      compilerOptions: {
+        target: "esnext",
+        module: "preserve",
+        moduleResolution: "bundler",
+        strict: true,
+        noUncheckedIndexedAccess: true,
+        verbatimModuleSyntax: true,
+        allowImportingTsExtensions: true,
+        noEmit: true,
+        skipLibCheck: true,
+        ...options,
+      },
+      files: [file],
+    }),
+  );
+  const run = spawnSync(TSC, ["-p", project, "--pretty", "false"], { encoding: "utf8" });
+  if (run.error) throw run.error;
+  return run.stdout.split("\n").filter((line) => line.includes("error TS"));
 }
 
 describe("SdkOperation", () => {
@@ -403,7 +412,7 @@ export const fits = (operations: readonly OpenApiOperation[]): readonly SdkOpera
 `,
     );
     const errors = typeErrors(file, {
-      lib: ["lib.es2022.d.ts"],
+      lib: ["es2022"],
       types: ["node"],
       typeRoots: [join(here, "../node_modules/@types")],
     });
@@ -491,7 +500,7 @@ export class Example extends GeneratedOperations {
     // The flags the SDKs on this stack publish with. DOM and no Node types: an SDK runs wherever
     // fetch does, so the transport may lean on nothing only Node has.
     const errors = typeErrors(join(dir, "uses.ts"), {
-      lib: ["lib.esnext.d.ts", "lib.dom.d.ts"],
+      lib: ["esnext", "dom"],
       types: [],
       noImplicitOverride: true,
       noFallthroughCasesInSwitch: true,

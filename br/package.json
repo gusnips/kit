@@ -55,7 +55,7 @@
     "release:major": "bun pm version major && bun publish --access public"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },
   "repository": {

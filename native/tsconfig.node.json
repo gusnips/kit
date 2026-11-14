@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // `src/node/` (the Metro config and the CSS build, which run in Node before the bundle exists)
+    // and the tests. This is the only program where a `node:` import typechecks.
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "rootDir": "./src",
+    "noEmit": true
+  },
+  "include": ["src/**/*"]
+}

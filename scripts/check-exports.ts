@@ -42,6 +42,7 @@ const PACKAGES = [
   "cnpj",
   "react",
   "vite",
+  "native",
   "migrate",
   "sdkgen",
   "server",

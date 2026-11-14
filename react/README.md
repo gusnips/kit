@@ -100,8 +100,8 @@ Two rules come with it:
   The helper clears the key it is given, so a second copy that drifts leaves the session where it
   was. `supabaseAuthStorage` returns the storage and key supabase-js already picks, so switching
   signs nobody out. Where `localStorage` is missing or blocked, such as a prerender, it keeps the
-  session in memory, as supabase-js does, instead of throwing. On React Native, build the object
-  yourself: `{ storage: AsyncStorage, storageKey: supabaseStorageKey(supabaseUrl) }`.
+  session in memory, as supabase-js does, instead of throwing. On React Native, take
+  `supabaseAuthStorage` from `@gusnips/native/supabase`, which is the same object on AsyncStorage.
 - **If your screen does not reload after signing out, clear your own store when the helper
   resolves.** The session is out of storage by then, but auth-js sends `SIGNED_OUT` only once it
   has finished the first call: a moment later, or up to 22 seconds on auth-js 2.106.

@@ -15,6 +15,7 @@
     "cnpj",
     "react",
     "vite",
+    "native",
     "migrate",
     "sdkgen",
     "server"
@@ -23,7 +24,7 @@
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
     "typecheck": "bun run --filter '*' typecheck && tsc -p tsconfig.scripts.json",
-    "lint": "oxlint tokens oxlint http locale br cnpj react vite migrate sdkgen server scripts",
+    "lint": "oxlint tokens oxlint http locale br cnpj react vite native migrate sdkgen server scripts",
     "purity": "bun run scripts/check-purity.ts && bun run --filter '@gusnips/server' purity",
     "exports": "bun run scripts/check-exports.ts",
     "release:check": "bun run scripts/check-release.ts",

@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // What runs on the phone, under Hermes. No DOM and no Node: React Native's own globals
+    // (`XMLHttpRequest`, `fetch`, `__DEV__`) arrive with `react-native`'s types, and `node:*`,
+    // `process` and `localStorage` must not typecheck here. `scripts/check-purity.ts` holds the
+    // same line at the source level, because a root-level @types/node can make a stray import
+    // compile anyway. `src/node/` is the build-time half and is checked by tsconfig.node.json.
+    "lib": ["ES2022"],
+    "types": [],
+    "rootDir": "./src",
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/node/**/*", "src/**/*.test.ts"]
+}

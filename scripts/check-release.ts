@@ -22,7 +22,8 @@
  *   code with that job's DATABASE_URL, and two generic names collide in an adopter's `.bin`;
  * - every entry of the unpacked tarball imports, and every bin runs, under plain `node` with only
  *   its peers installed. That is the one check that proves no Bun-only global reached the
- *   published code.
+ *   published code. The exception is `BUNDLE_ONLY` below: an entry that runs only inside a React
+ *   Native bundle is parsed instead, because `react-native` itself does not import under node.
  *
  * Run: bun run release:check
  */
@@ -48,10 +49,25 @@ const PACKAGES = [
   "cnpj",
   "react",
   "vite",
+  "native",
   "migrate",
   "sdkgen",
   "server",
 ];
+
+/**
+ * Entries that only ever load inside a React Native bundle, by package name.
+ *
+ * Importing them under node fails on their first line, and the failure is not ours: `react-native`
+ * ships Flow source that only Metro's Babel transform can read, and NetInfo, AsyncStorage and
+ * react-native-localize all import it. So each file these entries reach is run through
+ * `node --check` instead, which still proves the published code is plain JavaScript a bundler can
+ * read. The rest of what the import proves (no Bun-only global) `bun run purity` covers for these
+ * files at the source.
+ */
+const BUNDLE_ONLY: Record<string, readonly string[]> = {
+  "@gusnips/native": [".", "./theme", "./network", "./query", "./i18n", "./supabase"],
+};
 
 /** The commands a bin dispatches to. Each one is run with `--help` from the unpacked tarball. */
 const COMMANDS: Record<string, string[]> = {
@@ -74,6 +90,16 @@ const run = (command: string, args: string[], cwd: string, timeout?: number) =>
     stdio: ["ignore", "pipe", "pipe"],
     timeout,
   });
+
+/** Every file reachable from `entry` through relative imports, itself included. */
+async function relativeGraph(entry: string, seen = new Set<string>()): Promise<string[]> {
+  if (seen.has(entry)) return [];
+  seen.add(entry);
+  const source = await readFile(entry, "utf8");
+  for (const [, specifier] of source.matchAll(/(?:from|import)\s*\(?\s*["'](\.[^"']+)["']/g))
+    if (specifier !== undefined) await relativeGraph(join(dirname(entry), specifier), seen);
+  return [...seen];
+}
 
 async function manifestOf(dir: string): Promise<Manifest> {
   return JSON.parse(await readFile(join(ROOT, dir, "package.json"), "utf8")) as Manifest;
@@ -190,6 +216,15 @@ try {
       const file = typeof target === "string" ? target : target.default;
       if (file && !file.endsWith(".js")) continue;
       const specifier = name + subpath.slice(1);
+      if (file && BUNDLE_ONLY[name]?.includes(subpath)) {
+        for (const each of await relativeGraph(join(install, "node_modules", name, file)))
+          try {
+            run("node", ["--check", each], install);
+          } catch (err) {
+            problems.push(`${specifier} reaches ${each}, which does not parse: ${String(err)}`);
+          }
+        continue;
+      }
       // Exit once the import resolves. `@gusnips/vite/render` loads React's static renderer, which
       // holds the event loop open on purpose (invariant 1 in AGENTS.md), so waiting for node to
       // exit by itself waits forever. The question here is whether the entry imports. The

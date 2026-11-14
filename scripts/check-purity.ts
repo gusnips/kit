@@ -14,6 +14,11 @@
  *   react/   no Node. Browser globals are the point — but see the SSR note below.
  *   vite/    unrestricted. It is the only package allowed `node:fs`, and having somewhere
  *            for that to live is the reason the other three can be strict.
+ *   native/  no Node and no DOM in what runs on the phone. React Native has `XMLHttpRequest`
+ *            and a `navigator`, and has no `document`, no `localStorage` and no `window`
+ *            worth reading, so those crash on a phone the way `node:fs` crashes in a browser.
+ *            `native/src/node/` is the Metro config and the CSS build, which run in Node, and
+ *            is exempt.
  *
  * What this does NOT catch, and no grep can: a browser global read at MODULE SCOPE inside
  * `react/`, which crashes a prerender rather than a bundle. One donor's `themeStore.ts` was the
@@ -46,6 +51,13 @@ const BROWSER_RULE: Rule = {
   description: "Browser-only global",
 };
 
+/** The browser globals React Native does not have. `XMLHttpRequest` it does, so it is not here. */
+const DOM_RULE: Rule = {
+  pattern: /(?:^|[^./'"\w$])(?:window|document|localStorage|sessionStorage)\s*[.,[;)}\n]/,
+  category: "browser",
+  description: "Browser global React Native does not have",
+};
+
 /** Which rules apply where. A package missing from this map is not checked. */
 const PACKAGES: Record<string, Rule[]> = {
   http: [NODE_RULE, BROWSER_RULE],
@@ -53,6 +65,7 @@ const PACKAGES: Record<string, Rule[]> = {
   br: [NODE_RULE, BROWSER_RULE],
   cnpj: [NODE_RULE, BROWSER_RULE],
   react: [NODE_RULE],
+  native: [NODE_RULE, DOM_RULE],
   // vite/ is deliberately absent — it is the package that gets to touch the filesystem.
   // tokens/ too, and for a different reason worth saying rather than leaving as a gap in a map:
   // it ships no JavaScript at all, so its only `.ts` is the build-time Tailwind compile check,
@@ -61,6 +74,9 @@ const PACKAGES: Record<string, Rule[]> = {
 };
 
 const TEST_FILE = /(?:^|\/)(?:__tests__\/|[^/]+\.test\.tsx?$)/;
+
+/** Build-time code inside a package whose runtime is checked: it runs in Node by design. */
+const NODE_TOOLING = /^native\/src\/node\//;
 
 async function collectTsFiles(dir: string): Promise<string[]> {
   const files: string[] = [];
@@ -103,7 +119,7 @@ async function main(): Promise<void> {
   for (const [pkg, rules] of Object.entries(PACKAGES)) {
     const src = join(root, pkg, "src");
     const files = (await collectTsFiles(src).catch(() => [])).filter(
-      (f) => !TEST_FILE.test(relative(root, f)),
+      (f) => !TEST_FILE.test(relative(root, f)) && !NODE_TOOLING.test(relative(root, f)),
     );
     checked += files.length;
     for (const file of files) {

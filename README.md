@@ -2,8 +2,8 @@
 
 The layer under a TypeScript app: the build rig, the fetch client, the auth store, the guards and
 the tokens for a Vite + React frontend, and the migrations, the errors and the API edge for a Bun
-or Node server on Postgres. Eleven packages on npm, under `@gusnips`. You install only the ones you
-use.
+or Node server on Postgres, with one more for a bare React Native app. Twelve packages on npm,
+under `@gusnips`. You install only the ones you use.
 
 Not a component library. There is no Button here, and there never will be: the two best copies
 in the repos this came from are 104 lines and 60 lines, and they share the idea and nothing
@@ -19,7 +19,7 @@ import { cn } from "@gusnips/react";
 cn("p-2", "p-4"); // → "p-4"
 ```
 
-## Eleven packages
+## Twelve packages
 
 For the frontend:
 
@@ -32,6 +32,12 @@ For the frontend:
 | [`@gusnips/cnpj`](cnpj/README.md)     | a company's public record, by CNPJ      | `@gusnips/br` |
 | [`@gusnips/react`](react/README.md)   | the headless runtime                    | react         |
 | [`@gusnips/vite`](vite/README.md)     | the prerender rig and the vite preset   | node          |
+
+For a bare React Native app:
+
+| Package                               | What it is                                                 | Needs                          |
+| ------------------------------------- | ---------------------------------------------------------- | ------------------------------ |
+| [`@gusnips/native`](native/README.md) | Metro config, the Tailwind build, streams, theme, language | react-native, `@gusnips/react` |
 
 For the server:
 
@@ -47,7 +53,7 @@ For any repo:
 | ------------------------------------- | ------------------------------------------- | -------- |
 | [`@gusnips/oxlint`](oxlint/README.md) | the lint core of a TypeScript or React repo | `oxlint` |
 
-They are eleven and not one because of what each consumer can afford to install. An Astro
+They are twelve and not one because of what each consumer can afford to install. An Astro
 marketing site wants the tokens and no JavaScript. An API server wants the envelope and the
 CNPJ check, and no React. A browser bundle wants the runtime and no `node:fs`. The build script
 is the only thing that needs the filesystem, so it is the only thing that gets it.

@@ -135,6 +135,37 @@ describe("createSupabaseSessionAdapter", () => {
     });
   });
 
+  it("shares one refresh between callers that overlap, then refreshes again", async () => {
+    let calls = 0;
+    let release: () => void = () => {};
+    const adapter = createSupabaseSessionAdapter(
+      auth({
+        refreshSession: async () => {
+          calls += 1;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return { data: { session: { access_token: `token-${calls}` } }, error: null };
+        },
+      }),
+    );
+
+    // The API client and a hand-opened stream asking at the same moment.
+    const first = adapter.refresh();
+    const second = adapter.refresh();
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { token: "token-1", reachedAuth: true },
+      { token: "token-1", reachedAuth: true },
+    ]);
+    expect(calls).toBe(1);
+
+    const later = adapter.refresh();
+    release();
+    await expect(later).resolves.toEqual({ token: "token-2", reachedAuth: true });
+    expect(calls).toBe(2);
+  });
+
   it("keeps the session when a refresh never reached auth", async () => {
     const retryable = new AuthRetryableFetchError("offline", 0);
     const returned = createSupabaseSessionAdapter(

@@ -6,7 +6,7 @@ import {
   type SupabaseClientOptions,
   type SupportedStorage,
 } from "@supabase/supabase-js";
-import { SIGN_OUT_TIMEOUT_MS, type SessionAdapter } from "./api-client.ts";
+import { SIGN_OUT_TIMEOUT_MS, type RefreshResult, type SessionAdapter } from "./api-client.ts";
 
 interface SupabaseSessionResult {
   data: { session: { access_token: string } | null };
@@ -283,26 +283,39 @@ async function withinSignOutDeadline(
  * `stored` is optional here but not at a sign-out button. The API client signs out only after
  * auth has answered: a refresh auth refused, or a new token the API refused. So the network was up
  * a moment earlier, and what `stored` covers is the connection dropping in between.
+ *
+ * `refresh` is single-flight here as well as inside the API client. The client's gate only covers
+ * the client: a stream opened by hand (React Native's SSE over XHR, which cannot go through
+ * `apiStream`) refreshes through this adapter directly. GoTrue rotates the refresh token on use,
+ * so a stream starting while the boot queries refresh would race them, and the loser signs the
+ * person out. Sharing the call here closes that for every caller of the adapter.
  */
 export function createSupabaseSessionAdapter(
   auth: SupabaseSessionAuth,
   stored?: SupabaseSessionStorage,
 ): SessionAdapter {
+  let refreshing: Promise<RefreshResult> | null = null;
+  const refreshOnce = async (): Promise<RefreshResult> => {
+    try {
+      const { data, error } = await auth.refreshSession();
+      return {
+        token: data.session?.access_token ?? null,
+        reachedAuth: error === null || reachedAuth(error),
+      };
+    } catch (error) {
+      return { token: null, reachedAuth: reachedAuth(error) };
+    }
+  };
   return {
     getToken: async () => {
       const { data } = await auth.getSession();
       return data.session?.access_token ?? null;
     },
-    refresh: async () => {
-      try {
-        const { data, error } = await auth.refreshSession();
-        return {
-          token: data.session?.access_token ?? null,
-          reachedAuth: error === null || reachedAuth(error),
-        };
-      } catch (error) {
-        return { token: null, reachedAuth: reachedAuth(error) };
-      }
+    refresh: () => {
+      refreshing ??= refreshOnce().finally(() => {
+        refreshing = null;
+      });
+      return refreshing;
     },
     signOut: async () => {
       const { error } = stored

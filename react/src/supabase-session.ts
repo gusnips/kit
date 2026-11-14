@@ -327,7 +327,12 @@ export function createSupabaseSessionAdapter(
  * after.
  */
 export type EmailLinkType =
-  "signup" | "invite" | "magiclink" | "recovery" | "email_change" | "email";
+  | "signup"
+  | "invite"
+  | "magiclink"
+  | "recovery"
+  | "email_change"
+  | "email";
 
 const EMAIL_LINK_TYPES: Record<EmailLinkType, true> = {
   signup: true,

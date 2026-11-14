@@ -269,8 +269,18 @@ bun run purity               # the platform guards on their own: the frontend's,
 bun run exports              # every export resolves, and no optional peer is in a main barrel
 bun run release:check        # what the REGISTRY would get: pack, unpack, run under plain node
 bun run build
-bun run format               # prettier --write; run it before pushing
+bun run format               # oxfmt, writing; run it before pushing
+bun run lint                 # oxlint over every package and scripts/
 ```
+
+**Kit's own tooling is TypeScript 7, oxlint and oxfmt.** `tsc` is still the command to typecheck and
+to build. `.oxlintrc.json` at the root extends `oxlint/base.json` (this repo lints with the package
+it publishes), and `react/` has its own `.oxlintrc.json` extending `oxlint/react.json`, because the
+react-hooks rules apply there only and an oxlint `overrides` entry cannot extend a preset. Each
+package's `lint` script names its config with `-c`, because oxlint does not look upward for one.
+Formatting is `.oxfmtrc.json`. ESLint, typescript-eslint and Prettier are gone; Prettier remains a
+devDependency of `sdkgen` alone, for the test of the path that formats with it. What an app changes
+to follow is the last section of `MIGRATIONS.md`.
 
 Per package: `cd react && bun run test`, etc.
 
@@ -759,7 +769,7 @@ Six more, 16 to 21, are in `react/AGENTS.md`, and the token contract is in `toke
 
 ## House rules
 
-- 2-space, printWidth 100, double quotes (matches `.prettierrc`).
+- 2-space, printWidth 100, double quotes (matches `.oxfmtrc.json`).
 - Source imports keep real `.ts` extensions; `rewriteRelativeImportExtensions` emits `.js`.
 - No `as any` / `as unknown as T`. Fix the type.
 - Comments explain **why**, especially the non-obvious production reason. That is most of the

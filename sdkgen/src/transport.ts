@@ -217,7 +217,8 @@ interface Prepared {
 }
 
 type Outcome<T, M> =
-  { ok: true; answer: Answer<T, M> } | { ok: false; failure: Omit<Failure, "idempotencyKey"> };
+  | { ok: true; answer: Answer<T, M> }
+  | { ok: false; failure: Omit<Failure, "idempotencyKey"> };
 
 /** The request every attempt sends: the path filled in, the rest in the query or the body. */
 function prepare(

@@ -37,7 +37,7 @@ both.
 - One catalog of versions, so every workspace gets the same copy of each package.
   [Set up the repo](#set-up-the-repo) shows it.
 - turbo runs a task in every workspace and skips the ones whose inputs did not change.
-- `bun run check` at the root runs lint, types, tests, the build, Prettier and knip. One command
+- `bun run check` at the root runs lint, types, tests, the build, the formatter check and knip. One command
   answers "is this ready?"
 
 ### The folders at the top
@@ -166,12 +166,12 @@ newest put them next to the file. Tests run with Vitest.
 - **A static host** serves the web app and the site. After the build they are only files, so the
   API is the only server you run. Most of our apps use Cloudflare Pages. Its `_redirects` file
   sends every address to `index.html`, so a reload on `/notes` still finds the app.
-- **ESLint, Prettier and knip.** knip finds files and exports nothing uses.
+- **oxlint, oxfmt and knip.** knip finds files and exports nothing uses.
 
 ### Rules for the code
 
 - **No `as any`, and no `as unknown as T`, outside tests.** Fix the type. A cast tells the
-  compiler to stop checking, so the bug it would have caught ships. ESLint's `no-explicit-any`
+  compiler to stop checking, so the bug it would have caught ships. oxlint's `no-explicit-any`
   rule catches the `any`. In a test, a cast is fine with a comment that says why.
 - **Comments say why, not what.** The code already says what it does. The reason, often something
   that broke once, is what the next person needs before they "simplify" it.
@@ -249,7 +249,7 @@ the repo uses.
       "react-dom": "^19.3.0",
       "react-router-dom": "^7.18.4",
       "tailwindcss": "^4.3.3",
-      "typescript": "^5.9.3",
+      "typescript": "^7.0.2",
       "vite": "^8.3.1",
       "vitest": "^4.1.2",
       "zod": "^4.6.5",
@@ -271,7 +271,7 @@ the repo uses.
 
 A workspace then asks the catalog instead of naming a range: `"@gusnips/react": "catalog:"`.
 `bun run check` runs the types, the tests and the build in every workspace. Add lint to it when you
-add ESLint.
+add oxlint.
 
 **Keep one range per package.** When two workspaces ask for two ranges, the install can put two
 copies of a package in the tree, and it says nothing. We tried it: one workspace on `0.9.14` next
@@ -340,6 +340,12 @@ That is `tsconfig.base.json`. Bun and Vite run TypeScript themselves, so `tsc` o
   "include": ["src", "scripts", "vitest.config.ts"]
 }
 ```
+
+**This is TypeScript 7, the native compiler.** `tsc` is the same command. Three things differ from
+5: `baseUrl` is removed (use `paths` with values that start with `./`), `types` is empty unless you
+list it (so `"types": ["bun"]` above is needed, not a nicety), and a tsconfig with an `outDir` needs
+a `rootDir`. The compiler's JavaScript API is not at `import ts from "typescript"` any more; run
+`tsc` instead.
 
 **Put every folder with code in an `include`.** A script outside every tsconfig is checked by
 nothing, and nothing warns you. The migration script lives in `scripts`, so `scripts` is listed.

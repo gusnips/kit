@@ -108,6 +108,9 @@ describe("writeGenerated in a repo that formats with oxfmt", () => {
         stale: [],
       });
     },
+    // Each call starts an oxfmt process, and on a busy machine that takes seconds. vitest's 5 s
+    // default failed these twice in three runs at a load average near 300.
+    60_000,
   );
 
   it("says to install oxfmt when the repo has the config and not the binary", async () => {
@@ -120,5 +123,5 @@ describe("writeGenerated in a repo that formats with oxfmt", () => {
     await expect(writeGenerated({ "a.ts": "export const = ;" }, { root })).rejects.toThrow(
       /oxfmt could not format .*a\.ts/,
     );
-  });
+  }, 60_000);
 });

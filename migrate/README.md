@@ -174,7 +174,7 @@ The output has no timestamp, so the same schema always gives the same bytes. It 
 
 ```bash
 bunx gusnips-migrate db-types --out src/database.types.ts \
-  --format "bunx prettier --stdin-filepath src/database.types.ts"
+  --format "bunx oxfmt --stdin-filepath src/database.types.ts"
 ```
 
 `--check` compares after `--format`, because the file you commit is the formatted one.
@@ -193,7 +193,7 @@ for Supabase fail at their first `GRANT`. `gusnips-migrate supabase-stand-in` cr
 - run: bun install --frozen-lockfile
 - run: bunx gusnips-migrate supabase-stand-in
 - run: bunx gusnips-migrate --dir apps/api/migrations --manual --yes
-- run: bunx gusnips-migrate db-types --out src/database.types.ts --format "bunx prettier --stdin-filepath src/database.types.ts" --check
+- run: bunx gusnips-migrate db-types --out src/database.types.ts --format "bunx oxfmt --stdin-filepath src/database.types.ts" --check
 ```
 
 `bunx gusnips-migrate` runs the copy the install put in `node_modules`. Where the package is not

@@ -37,7 +37,7 @@
     "build": "bun run scripts/check-preset.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun run scripts/check-preset.ts",
-    "lint": "eslint scripts",
+    "lint": "oxlint -c ../.oxlintrc.json scripts",
     "sync:docs": "cp ../LICENSE .",
     "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run sync:docs",
     "release:patch": "bun pm version patch && bun publish --access public",
@@ -47,7 +47,7 @@
   "devDependencies": {
     "@types/node": "^24.12.0",
     "oxlint": "1.93.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "repository": {
     "type": "git",

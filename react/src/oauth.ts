@@ -29,7 +29,11 @@ import type { ApiClient, RequestOptions } from "./api-client.ts";
  */
 
 export type OAuthRefusalReason =
-  "unknown-client" | "redirect-mismatch" | "invalid-request" | "wrong-resource" | "unknown-code";
+  | "unknown-client"
+  | "redirect-mismatch"
+  | "invalid-request"
+  | "wrong-resource"
+  | "unknown-code";
 
 /** What the server sends instead of a view. Word your own page for `reason`. */
 export interface OAuthRefusal {

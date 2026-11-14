@@ -58,6 +58,10 @@
       "types": "./dist/node/express/index.d.ts",
       "default": "./dist/node/express/index.js"
     },
+    "./push": {
+      "types": "./dist/node/push/index.d.ts",
+      "default": "./dist/node/push/index.js"
+    },
     "./openapi": {
       "types": "./dist/openapi/index.d.ts",
       "default": "./dist/openapi/index.js"
@@ -97,7 +101,10 @@
     "mcp",
     "oauth",
     "openapi",
-    "express"
+    "express",
+    "push",
+    "apns",
+    "fcm"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",

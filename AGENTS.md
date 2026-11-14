@@ -22,7 +22,7 @@ folder you change.
 | `tokens/AGENTS.md`  | the token contract, measured                                           |
 | `oxlint/AGENTS.md`  | what the oxlint presets hold, and where oxlint and ESLint differ       |
 | `migrate/AGENTS.md` | server invariants 1 to 20, the SSL helper, and what the build measured |
-| `server/AGENTS.md`  | server invariants 21 to 52, and 57                                     |
+| `server/AGENTS.md`  | server invariants 21 to 52, 57 and 58                                  |
 | `sdkgen/AGENTS.md`  | server invariants 53 to 56                                             |
 | `MIGRATIONS.md`     | what moving each app onto the frontend packages taught                 |
 
@@ -251,6 +251,7 @@ dedup, the same as in the frontend packages.
         ├── env.ts        ← validateEnv(): every problem with the environment, in one error
         ├── node/         ← the one directory allowed Node: fetchPublic(), scryptSealKey(), the API key codec, the OAuth secret and client fetch, and the drain
         │   ├── mail/     ← createMailer(), the /mail subpath: SMTP needs a socket a Worker lacks
+        │   ├── push/     ← createPushNotifier() and the APNs and FCM transports: APNs needs HTTP/2
         │   └── express/  ← fromHono(), the /express subpath: a Hono app inside an Express one
         └── __tests__/    ← the throwaway redis-server the Redis and BullMQ suites share
 ```

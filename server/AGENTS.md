@@ -1,9 +1,9 @@
 Rules for `@gusnips/server`. Layout, commands, publishing and house rules are in the root
 `AGENTS.md`. The server invariants run across three files: 1 to 20 in `migrate/AGENTS.md`, 21 to
-52 and 57 here, 53 to 56 in `sdkgen/AGENTS.md`. Each one is a bug a donor shipped, or a fix a donor had
+52, 57 and 58 here, 53 to 56 in `sdkgen/AGENTS.md`. Each one is a bug a donor shipped, or a fix a donor had
 and the others did not. The tests pin them.
 
-# Invariants 21 to 52 and 57, for `@gusnips/server`
+# Invariants 21 to 52, 57 and 58, for `@gusnips/server`
 
 21. **A success builder returns an ANSWER, not a body — so on Hono, import the adapters.** `ok`,
     `created`, `paginated` and `noContent` in `responses.ts` answer `{ status, body }`, because the
@@ -914,3 +914,26 @@ and the others did not. The tests pin them.
     and finish change nothing. They hold an append, a child insert and a spend open in their own
     transactions while a drain, a sweep and a takeover wait on them. And they hang the heartbeat
     of a one-second lease and check that the handler's signal aborts on its own.
+
+58. **A push removes a device only on an answer that proves its token dead, and `send` never
+    throws.** Lifted from the one donor with working push: APNs over `node:http2` and FCM over
+    `fetch`, with no SDK. Two of its removal rules were wider than the proof. It removed on APNs'
+    `DeviceTokenNotForTopic` and on any FCM 404, and a wrong `bundleId` or project id can draw
+    those for every device, so one typo in config would delete every registration, which only each
+    person opening the app again can undo. Here a token goes on a 410, on `BadDeviceToken` from
+    both APNs environments, or on FCM's `UNREGISTERED`. Neither wide case was measured against
+    Apple or Google; the narrow rule can only keep a dead token, never delete a good one. Both
+    environments are tried because a debug build's token is a sandbox token and nothing on the
+    server says so, so stopping at production's refusal would remove a working phone.
+
+    **The session's `error` listener is required, and it logs nothing.** With none, a refused
+    connect ended the process on Node 24.21 and Bun 1.4.2, even with a handler on the stream
+    (measured). The stream's own error names the cause ("caused by: connect ECONNREFUSED"), so
+    the send's reason carries it. A stream that times out destroys its connection: a socket that
+    died without a word keeps `closed` false, and every later send would wait its 10 seconds on it.
+    The provider token's signing is single-flight, where the donor kept only the signed value, so
+    a burst to N devices signed N tokens. The transports take their config as arguments and the
+    notifier takes the logger, because the donor read its env and its tracing module directly.
+    Nine planted defects (each removal rule widened, no sandbox, a token per send, no listener,
+    no single-flight exchange, a throw let through, an Android token sent through APNs) each
+    failed the suite, with a green control.

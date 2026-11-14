@@ -2111,6 +2111,62 @@ Your unsubscribe route stays yours. Three rules for it:
 - **A failure on your side is not a bad link.** When your database or auth is down, answer 503 and
   let the person try again. Telling them the link is invalid loses the unsubscribe.
 
+## Phone push
+
+One push goes to every phone a person has: APNs for iPhones, FCM for Android. Nothing to install,
+because APNs runs on `node:http2` and FCM on `fetch`.
+
+```ts
+import { createApnsTransport, createFcmTransport, createPushNotifier } from "@gusnips/server/push";
+
+const account = env.FCM_SERVICE_ACCOUNT ? JSON.parse(env.FCM_SERVICE_ACCOUNT) : undefined;
+const push = createPushNotifier({
+  transports: {
+    ios: createApnsTransport({
+      privateKeyPem: env.APNS_PRIVATE_KEY,
+      keyId: env.APNS_KEY_ID,
+      teamId: env.APNS_TEAM_ID,
+      bundleId: "com.acme.app",
+    }),
+    ...(account && {
+      android: createFcmTransport({
+        projectId: account.project_id,
+        clientEmail: account.client_email,
+        privateKeyPem: account.private_key,
+      }),
+    }),
+  },
+  devices: pushDevices,
+  logger,
+});
+
+void push.send(user.id, { title: "Your report is ready", data: { reportId } });
+```
+
+`pushDevices` is your device table behind two functions, `listForUser(userId)` and
+`remove(token)`. The table and the route that fills it stay in your app.
+
+- **Make each transport once per process.** The APNs one keeps a connection to Apple and a signed
+  token for 50 minutes; the FCM one keeps Google's access token for 55. Made per job, each would
+  sign a new token every time, and Apple asks for one no more than every 20 minutes.
+- **Leave out a platform you have no keys for.** Its devices are skipped and keep their rows. They
+  are never sent through the other platform, where the token would fail and look dead.
+- **A token is removed only when the answer proves it dead**: a 410 from APNs, a token both APNs
+  environments refuse, or FCM's `UNREGISTERED`. Every other refusal is logged and the token
+  stays. A wrong `bundleId` or project id gets a refusal for every device, and removing on that
+  would delete every phone you have.
+- **APNs tries production first, then sandbox.** App Store and TestFlight builds have production
+  tokens, a debug build from Xcode has sandbox ones, and the token does not say which. A debug
+  phone costs one extra request per push.
+- **`send` never throws**, because a failed push must not fail the work it was announcing. It
+  answers how it went (`sent`, `partial`, `failed`, `unregistered`, `unconfigured` or
+  `no-devices`) for your metrics, and writes each failure to `logger`.
+- **Which pushes to send is yours.** Categories, a person's settings and muted items are product
+  rules. Check them before you call `send`.
+- **Register a device on its token**: `ON CONFLICT (token) DO UPDATE SET user_id = excluded.user_id`.
+  A phone that signs in to another account then stops getting the first account's pushes.
+- Each request waits 10 seconds at most. `data` values are strings, and `badge` is for iOS only.
+
 ## The environment
 
 Check the environment first thing at boot. A box with a wrong `.env` then stops with a list of
@@ -2309,6 +2365,7 @@ Each of these was measured, not assumed.
 - A cron schedule without a time zone does not compile.
 - A mail without a text part is refused.
 - A mail login is never sent over a connection without TLS.
+- A push removes a device only on an answer that proves its token dead.
 - An MCP tool handler never throws, and a tool's `.shape` does not compile.
 - A REST body that is not a JSON object is refused, never read as `{}`.
 - An API reference names the origin you configure, never the one a request came in on. A

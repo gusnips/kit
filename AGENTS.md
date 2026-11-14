@@ -2,8 +2,9 @@ Entry point for AI agents working on this repo.
 
 # kit
 
-**The layer under a TypeScript app, in eleven packages.** Seven sit under a Vite + React SPA, three
-under a Bun or Node server on Postgres, and one is the lint config both share. They share one repo because the server packages use
+**The layer under a TypeScript app, in twelve packages.** Seven sit under a Vite + React SPA, one
+under a bare React Native app, three under a Bun or Node server on Postgres, and one is the lint
+config they all share. They share one repo because the server packages use
 `@gusnips/http` too: a change to the envelope lands on both sides in one pull request, and
 `server` and `sdkgen` build against the `http` beside them, not the one on npm.
 
@@ -79,6 +80,7 @@ kit/                    ← repo root (this folder), git root
 ├── react/              ← @gusnips/react: the headless runtime. One required peer: react.
 │   └── src/ui/         ← the seven Base UI wrappers, behind a subpath (see below)
 ├── vite/               ← @gusnips/vite: the build rig. The ONLY frontend package allowed node:fs.
+├── native/             ← @gusnips/native: what only a bare React Native app needs. src/node/ is its build-time half.
 ├── migrate/ sdkgen/ server/ ← the server packages, laid out under "The server packages"
 ├── oxlint/             ← @gusnips/oxlint: two oxlint configs, base.json and react.json. No code, one check script.
 ├── scripts/            ← check-purity.ts, check-exports.ts and check-release.ts, the guards
@@ -150,8 +152,20 @@ consumer can afford to install:
 - `react/` runs in a browser AND inside a prerender, so it cannot contain `node:*`.
 - `vite/` needs `node:fs`. Having somewhere for that to live is what lets the other three be
   strict.
+- `native/` needs `react-native`, and most of its subpaths need a package with native code in it
+  (AsyncStorage, NetInfo, react-native-localize) that autolinking compiles into the app. No web app
+  should install any of that, so it is the React Native counterpart of `vite/` rather than a
+  subpath of `react/`. Its runtime is held to no Node and no DOM (`document`, `localStorage` and
+  `window` crash on a phone), and `src/node/`, the Metro config and the CSS build, is the one
+  folder that may use Node. It takes `@gusnips/react` and `@gusnips/http` as PEERS with a range
+  up to `<1`, never as a dependency: a dependency would pin `react` at pack time the way
+  `vite`'s does, and nest a second copy in every app whose own `react` caret sits elsewhere.
+  `bun run release:check` cannot import its phone entries under node, because `react-native` ships
+  Flow source only Metro reads, so it runs each file they reach through `node --check` instead
+  (`BUNDLE_ONLY` in the script).
 
-Dependency edges run one way: `vite/ → react/ → http/`, and `cnpj/ → br/`. Never the reverse. In
+Dependency edges run one way: `vite/ → react/ → http/`, `native/ → react/, http/` (as peers),
+and `cnpj/ → br/`. Never the reverse. In
 particular `PRERENDERED_ROUTE_ATTR` lives in `react/`, not `vite/`, because a **browser entry** reads
 it, and putting it in the build-time package would drag `node:` into the client bundle.
 
@@ -325,7 +339,7 @@ Tests do not run in CI (the fleet's CI minutes policy). Run them before every co
 - **`bun run release:check` packs each package and reads the manifest that comes out.** It is the
   only thing here that looks at what the registry will actually receive, and the only reason the
   bug above is a caught error rather than a broken tarball.
-- **Publish in dependency order** (`tokens`, `http`, `locale`, `br`, `cnpj`, `react`, `vite`, then `migrate`, `sdkgen`, `server`; `oxlint` depends on none of them and goes whenever), and bump `vite` whenever
+- **Publish in dependency order** (`tokens`, `http`, `locale`, `br`, `cnpj`, `react`, `vite`, `native`, then `migrate`, `sdkgen`, `server`; `oxlint` depends on none of them and goes whenever), and bump `vite` whenever
   `react` ships, because the pin inside it changed even when none of its own code did.
 - **And the adopter's half of that pin: the two carets move together, or the install grows a second
   copy of `react`.** That exact pin inside `vite` is reachable through the ADOPTER's `vite` caret,

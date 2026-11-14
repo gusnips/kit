@@ -173,3 +173,5 @@ export { createIdempotency } from "./idempotency.ts";
 export type { IdempotencyOptions, IdempotencyScope, IdempotentOutcome } from "./idempotency.ts";
 export { checkOAuthTable, createPgOAuthStore } from "./oauth-store.ts";
 export type { PgOAuthStoreOptions } from "./oauth-store.ts";
+export { createPgPushDevices } from "./push-devices.ts";
+export type { PgPushDevices, PgPushDevicesOptions } from "./push-devices.ts";

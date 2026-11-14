@@ -1,0 +1,152 @@
+{
+  "name": "@gusnips/native",
+  "version": "0.1.0",
+  "description": "What a bare React Native app needs beside @gusnips/react: streams over XHR, React Query on app focus and network, theme and language that remember the choice, the Supabase session storage, the Metro config for a bun monorepo, and the Tailwind to react-native-css build.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Gustavo Salomé",
+  "homepage": "https://github.com/gusnips/kit/tree/main/native#readme",
+  "bugs": {
+    "url": "https://github.com/gusnips/kit/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./theme": {
+      "types": "./dist/theme.d.ts",
+      "default": "./dist/theme.js"
+    },
+    "./network": {
+      "types": "./dist/network.d.ts",
+      "default": "./dist/network.js"
+    },
+    "./query": {
+      "types": "./dist/query.d.ts",
+      "default": "./dist/query.js"
+    },
+    "./i18n": {
+      "types": "./dist/i18n.d.ts",
+      "default": "./dist/i18n.js"
+    },
+    "./supabase": {
+      "types": "./dist/supabase.d.ts",
+      "default": "./dist/supabase.js"
+    },
+    "./metro": {
+      "types": "./dist/node/metro.d.ts",
+      "default": "./dist/node/metro.js"
+    },
+    "./css": {
+      "types": "./dist/node/css.d.ts",
+      "default": "./dist/node/css.js"
+    }
+  },
+  "bin": {
+    "gusnips-native-css": "./dist/node/bin/gusnips-native-css.js"
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": "^20.19.4 || ^22.13.0 || >=24.3.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "react-native",
+    "metro",
+    "tailwind",
+    "react-native-css",
+    "nativewind",
+    "react-query",
+    "i18next",
+    "supabase",
+    "sse"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "lint": "oxlint -c .oxlintrc.json src",
+    "sync:docs": "cp ../LICENSE .",
+    "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run build && bun run sync:docs",
+    "release:patch": "bun pm version patch && bun publish --access public",
+    "release:minor": "bun pm version minor && bun publish --access public",
+    "release:major": "bun pm version major && bun publish --access public"
+  },
+  "peerDependencies": {
+    "@gusnips/http": ">=0.2.0 <1",
+    "@gusnips/react": ">=0.10.0 <1",
+    "@react-native-async-storage/async-storage": ">=3",
+    "@react-native-community/netinfo": ">=12",
+    "@supabase/supabase-js": "^2",
+    "@tailwindcss/cli": "^4",
+    "@tanstack/react-query": "^5",
+    "i18next": ">=25",
+    "react": "^19",
+    "react-native": ">=0.86",
+    "react-native-css": "^3.0.7",
+    "react-native-localize": ">=3",
+    "tailwindcss": "^4"
+  },
+  "peerDependenciesMeta": {
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    },
+    "@react-native-community/netinfo": {
+      "optional": true
+    },
+    "@supabase/supabase-js": {
+      "optional": true
+    },
+    "@tailwindcss/cli": {
+      "optional": true
+    },
+    "@tanstack/react-query": {
+      "optional": true
+    },
+    "i18next": {
+      "optional": true
+    },
+    "react-native-css": {
+      "optional": true
+    },
+    "react-native-localize": {
+      "optional": true
+    },
+    "tailwindcss": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@gusnips/http": ">=0.2.0 <1",
+    "@gusnips/react": ">=0.10.0 <1",
+    "@react-native-async-storage/async-storage": "^3.1.1",
+    "@react-native-community/netinfo": "^12.0.1",
+    "@supabase/supabase-js": "^2.113.0",
+    "@tanstack/react-query": "^5.102.8",
+    "@types/node": "^24.12.0",
+    "@types/react": "^19.2.14",
+    "i18next": "^26.3.1",
+    "react": "^19.2.4",
+    "react-native": "0.86.2",
+    "react-native-css": "3.0.7",
+    "react-native-localize": "^3.7.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gusnips/kit.git",
+    "directory": "native"
+  }
+}

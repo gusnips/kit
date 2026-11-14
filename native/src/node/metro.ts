@@ -5,7 +5,9 @@
  *
  * - **Metro does not find workspaces on its own.** `watchFolders` and `nodeModulesPaths` point it at
  *   the monorepo, so a workspace package that ships TypeScript source resolves like any other.
- *   (Symlinks and package `exports` are on by default since Metro 0.79 and 0.82.)
+ *   (Symlinks and package `exports` are on by default since Metro 0.79 and 0.82.) It watches the
+ *   root's `node_modules` and each workspace folder, NEVER the root itself: see
+ *   {@link monorepoWatchFolders}.
  * - **One React, the app's.** bun's isolated store keeps a spare `react` at its root, and a package
  *   that forgets to declare react as a peer resolves `react` by walking up to THAT copy. Two Reacts
  *   in one bundle: the app's own screens render, and that package's hooks crash with "Cannot read
@@ -22,9 +24,9 @@
  * Metro's own types are not imported: this package does not depend on metro, and the few fields read
  * here are stated below.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /** What a resolver hands back to Metro. Only the `sourceFile` form is built here. */
 export type Resolution = { type: "sourceFile"; filePath: string } | { type: string };
@@ -98,7 +100,10 @@ export function nativeMetroConfig<C extends MetroConfigInput>(
   const extraRoots = monorepoRoot ? [monorepoRoot] : [];
   return {
     ...config,
-    watchFolders: unique([...(config.watchFolders ?? []), ...extraRoots]),
+    watchFolders: unique([
+      ...(config.watchFolders ?? []),
+      ...(monorepoRoot ? monorepoWatchFolders(monorepoRoot, projectRoot) : []),
+    ]),
     resolver: {
       ...config.resolver,
       nodeModulesPaths: unique([
@@ -108,6 +113,80 @@ export function nativeMetroConfig<C extends MetroConfigInput>(
       resolveRequest,
     },
   };
+}
+
+/**
+ * What Metro watches in a monorepo: the root's `node_modules` (bun's store is under it, and every
+ * package the app resolves lives there) and each workspace folder named by the root
+ * `package.json`'s `workspaces`, minus the app's own folder, which Metro watches already.
+ *
+ * Never the root. Without watchman, Metro's file map crawls each watched folder with `find` and
+ * keeps all of its output in one string, and a root holds everything else too: one adopter's had
+ * 55 checkouts under `.claude/worktrees`, each with its own `node_modules`. On Node 24.21 the
+ * crawl died after about four minutes with "RangeError: Invalid string length"
+ * (metro-file-map 0.84.4); on Node 26.0 it sat at 1% CPU for fifteen. A `resolver.blockList` does
+ * not help, because `find` still walks what the list hides. Watching only these folders, the same
+ * app's release bundle finished.
+ *
+ * `workspaces` may be a list or `{ packages: [...] }`. A pattern is a literal path or uses `*` for
+ * one folder name, which skips dot folders the way the package managers do, and `!` excludes. A
+ * folder counts only when it holds a `package.json`.
+ *
+ * ponytail: `**` is refused rather than expanded. No workspace list on this stack uses it, and a
+ * recursive walk from the root is the crawl this function exists to avoid.
+ */
+export function monorepoWatchFolders(monorepoRoot: string, projectRoot: string): string[] {
+  const root = resolve(monorepoRoot);
+  const manifestPath = join(root, "package.json");
+  if (!existsSync(manifestPath))
+    throw new Error(`nativeMetroConfig: no package.json at monorepoRoot (${root}).`);
+  const manifest: { workspaces?: unknown } = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  const app = resolve(projectRoot);
+  const patterns = workspacePatterns(manifest.workspaces);
+  const excluded = new Set(
+    patterns.filter((each) => each.startsWith("!")).flatMap((each) => expand(root, each.slice(1))),
+  );
+  const workspaces = patterns
+    .filter((each) => !each.startsWith("!"))
+    .flatMap((each) => expand(root, each))
+    .filter((folder) => !excluded.has(folder) && folder !== app);
+  return unique([join(root, "node_modules"), ...workspaces]);
+}
+
+function workspacePatterns(workspaces: unknown): string[] {
+  const list =
+    typeof workspaces === "object" && workspaces !== null && "packages" in workspaces
+      ? workspaces.packages
+      : workspaces;
+  return Array.isArray(list) ? list.filter((each) => typeof each === "string") : [];
+}
+
+/** The folders a pattern names, each holding a package.json. */
+function expand(root: string, pattern: string): string[] {
+  const segments = pattern.replace(/^\.\//, "").replace(/\/+$/, "").split("/");
+  if (segments.includes("**"))
+    throw new Error(
+      `nativeMetroConfig: the workspace pattern "${pattern}" uses **. Name each level with * ` +
+        "instead, so Metro is not sent to walk the repository.",
+    );
+  let folders = [root];
+  for (const segment of segments) {
+    folders = folders.flatMap((folder) => {
+      if (!segment.includes("*")) return [join(folder, segment)];
+      if (!existsSync(folder)) return [];
+      const matches = new RegExp(`^${segment.split("*").map(escapeRegExp).join("[^/]*")}$`);
+      return readdirSync(folder, { withFileTypes: true })
+        .filter(
+          (entry) => entry.isDirectory() && !entry.name.startsWith(".") && matches.test(entry.name),
+        )
+        .map((entry) => join(folder, entry.name));
+    });
+  }
+  return folders.filter((folder) => existsSync(join(folder, "package.json")));
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**

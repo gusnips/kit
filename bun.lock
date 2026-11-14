@@ -68,7 +68,7 @@
     },
     "native": {
       "name": "@gusnips/native",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "bin": {
         "gusnips-native-css": "./dist/node/bin/gusnips-native-css.js",
       },

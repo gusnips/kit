@@ -31,7 +31,8 @@ that:
   oxlint keeps outside `correctness`: `ban-ts-comment`, `no-array-constructor`,
   `no-case-declarations`, `no-empty`, `no-empty-object-type`, `no-fallthrough`, `no-namespace`,
   `no-prototype-builtins`, `no-regex-spaces`, `no-require-imports`, `no-unexpected-multiline`,
-  `no-unnecessary-type-constraint` and `no-unsafe-function-type`.
+  `no-unnecessary-type-constraint`, `no-unsafe-function-type`, `no-var`, `prefer-const`,
+  `prefer-rest-params` and `prefer-spread`.
 
 `react.json` extends `base.json`, turns on the `react` plugin, and sets what
 `eslint-plugin-react-hooks` 7 sets in `recommended`, at the same level:
@@ -44,6 +45,7 @@ that:
 Not there:
 
 - `unsupported-syntax`, `config` and `gating`. oxlint does not have them yet.
+- `no-octal`. oxlint has no such rule, and TypeScript rejects octal literals.
 - `react/purity` is off. It reports `new Date()` in a component, and the ESLint plugin does not. The
   plugin still reports `Date.now()` and `Math.random()`.
 - `react/jsx-key` is off. It reports the `components={[<b />, <i />]}` array that react-i18next's

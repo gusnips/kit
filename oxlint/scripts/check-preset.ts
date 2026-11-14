@@ -11,8 +11,9 @@
  * Three things are pinned:
  *
  * - the fixture's exact diagnostics, per preset. `base.json` must flag the `any`, the unused
- *   variable and the fourteen rules ESLint's two `recommended` sets turn on that oxlint leaves
- *   outside its `correctness` category; must NOT flag an unused `_`-prefixed argument or variable;
+ *   variable and the seventeen rules ESLint's `recommended` sets turn on that oxlint leaves
+ *   outside its `correctness` category (typescript-eslint's `eslint-recommended` layer adds
+ *   four of them: `no-var`, `prefer-const`, `prefer-rest-params`, `prefer-spread`); must NOT flag an unused `_`-prefixed argument or variable;
  *   and must say nothing about React. `react.json` adds the conditional hook and the stale effect
  *   dependency.
  * - the severity of every React rule `eslint-plugin-react-hooks@7`'s `recommended` sets, read back
@@ -80,6 +81,14 @@ export function same<T extends unknown>(value: T): T {
   return value;
 }
 export const call: Function = () => 1;
+export var legacy = 1;
+let never = 2;
+export const copy = never;
+export function rest(): number {
+  return Array.from(arguments).length;
+}
+export const spread = (list: number[]) => Math.max.apply(Math, list);
+pick;
 `,
   "hooks.tsx": `import { useEffect, useState } from "react";
 import { Trans } from "react-i18next";
@@ -124,6 +133,11 @@ const BASE_DIAGNOSTICS = [
   "recommended.ts:27 error typescript(no-require-imports)",
   "recommended.ts:28 error typescript(no-unnecessary-type-constraint)",
   "recommended.ts:31 error typescript(no-unsafe-function-type)",
+  "recommended.ts:32 error eslint(no-var)",
+  "recommended.ts:33 error eslint(prefer-const)",
+  "recommended.ts:36 error eslint(prefer-rest-params)",
+  "recommended.ts:38 error eslint(prefer-spread)",
+  "recommended.ts:39 error eslint(no-unused-expressions)",
 ];
 
 const REACT_DIAGNOSTICS = [

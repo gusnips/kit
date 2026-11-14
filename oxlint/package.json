@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/oxlint",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One oxlint config for a TypeScript repo, and one for a React repo. Rules go on top of it in the repo's own .oxlintrc.json.",
   "type": "module",
   "license": "MIT",

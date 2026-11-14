@@ -17,7 +17,7 @@ Read on oxlint 1.93.0, 2026-11-13:
   oxlint's defaults (`unicorn`, `typescript`, `oxc`). A preset cannot switch a default plugin off.
   `"plugins": []` in the repo keeps just the preset's.
 - `react/rules-of-hooks` is in oxlint's `pedantic` category, not `correctness`, so `categories`
-  alone does not turn it on. The same holds for 13 rules ESLint's two `recommended` sets enable, which
+  alone does not turn it on. The same holds for 17 rules ESLint's `recommended` sets enable, which
   `base.json` names one by one. `bun run test` fails if a line goes missing.
 - `oxlint --rules` prints nothing without `-f json`.
 - A fixture can stay silent for the wrong reason. A rule oxlint does not know is not an error, so
@@ -38,7 +38,8 @@ Measured 2026-11-13 by running `react.json` over the 22 checkouts that had an `a
 - Left on although ESLint never had them: `react/no-children-prop` (3 reports in 3 repos, all in tests
   that pass `children` to `createElement`) and the other `correctness` rules of the `react` plugin.
   They fire rarely and are right when they do.
-- `unsupported-syntax`, `config` and `gating` from the plugin do not exist in oxlint.
+- `unsupported-syntax`, `config` and `gating` from the plugin do not exist in oxlint, and neither
+  does `no-octal`.
 
 # Changing a preset
 
@@ -46,3 +47,10 @@ Run `bun run test` in this folder. After an oxlint bump, list its rules with
 `oxlint --rules -f json` and look for a rule that moved into `correctness` (it would then fire in
 every repo) or changed name. Raise the `oxlint` peer range only after the check passes on the new
 version.
+
+**Take the ESLint side from `eslint --print-config <a .ts file>`, never from reading the
+`recommended` arrays.** 0.1.0 shipped without `no-var`, `prefer-const`, `prefer-rest-params` and
+`prefer-spread`: typescript-eslint's `eslint-recommended` layer turns them on for TypeScript files,
+and the same layer turns off the rules TypeScript checks itself, so the two arrays read by hand miss
+both. Diff the printed rules against `oxlint --print-config` over the preset. On 2026-11-14 the only
+rule ESLint enforces and the preset lacks is `no-octal`, which oxlint has no rule for.

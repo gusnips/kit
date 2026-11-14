@@ -38,7 +38,7 @@
     "build": "bun run scripts/compile-check.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun run scripts/compile-check.ts",
-    "lint": "eslint scripts",
+    "lint": "oxlint -c ../.oxlintrc.json scripts",
     "sync:docs": "cp ../LICENSE .",
     "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run sync:docs",
     "release:patch": "bun pm version patch && bun publish --access public",

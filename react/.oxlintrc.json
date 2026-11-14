@@ -1,0 +1,5 @@
+{
+  "extends": ["../oxlint/react.json"],
+  "plugins": [],
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**"]
+}

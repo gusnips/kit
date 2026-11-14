@@ -8,7 +8,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { buildNativeCss, type PaletteEntry } from "../css.ts";
+import { buildNativeCss, watchNativeCss, type NativeCssResult, type PaletteEntry } from "../css.ts";
 
 const HELP = `gusnips-native-css: compile global.css for React Native, before Metro starts.
 
@@ -21,9 +21,11 @@ Usage: gusnips-native-css [options]
                      { "text": { "light": "text-ink", "dark": "dark:text-ink-dark" } }
                      writes colors.ts beside stylesheet.ts
   --rem <px>         pixels per rem (default: 16, as on the web)
+  --watch            build again when global.css or a file it imports changes
   -h, --help         show this
 
 Run it before Metro, in the same script: "start": "gusnips-native-css && react-native start"
+While you edit the CSS or the tokens, keep "gusnips-native-css --watch" open beside Metro.
 `;
 
 async function main(): Promise<number> {
@@ -34,6 +36,7 @@ async function main(): Promise<number> {
       out: { type: "string" },
       palette: { type: "string" },
       rem: { type: "string" },
+      watch: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -42,16 +45,29 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const root = resolve(values.root ?? ".");
-  const result = await buildNativeCss({
-    root,
+  const options = {
+    root: resolve(values.root ?? "."),
     input: values.input,
     outDir: values.out,
     rem: values.rem === undefined ? undefined : Number(values.rem),
     palette: values.palette === undefined ? undefined : await readPalette(resolve(values.palette)),
+  };
+  if (!values.watch) {
+    report(await buildNativeCss(options));
+    return 0;
+  }
+  // The folder watchers keep the process running until Ctrl-C. A failed build is printed and
+  // the watch goes on.
+  await watchNativeCss(options, {
+    onBuild: report,
+    onError: (error) => console.error(`native css: ${error.message}`),
   });
-  console.log(`native css: ${result.classes} classes → ${result.files.join(", ")}`);
+  console.log("native css: watching global.css and the files it imports. Ctrl-C stops.");
   return 0;
+}
+
+function report(result: NativeCssResult): void {
+  console.log(`native css: ${result.classes} classes → ${result.files.join(", ")}`);
 }
 
 /** The palette file is the app's own, but a typo in it should read as one, not as a crash. */

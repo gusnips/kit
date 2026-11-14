@@ -20,10 +20,11 @@
  * from where the app installed it.
  */
 import { spawnSync } from "node:child_process";
+import { statSync, watch, type FSWatcher } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ReactNativeCssStyleSheet } from "react-native-css/compiler";
 
 type Compiler = typeof import("react-native-css/compiler");
@@ -256,4 +257,117 @@ function missing(name: string): string {
 
 function isNotFound(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "MODULE_NOT_FOUND";
+}
+
+// ── Watching ─────────────────────────────────────────────────────────────────
+
+/**
+ * The files whose change means the stylesheet must be built again: the entry, and every file of the
+ * app's it imports, followed through their own imports. That is `global.css` and the token files
+ * it pulls in. A package import (`tailwindcss/theme.css`, `nativewind/theme`) is left out, because it
+ * changes only on an install. Source files are left out on purpose too: a `className` edit
+ * hot-reloads without a rebuild, and a rebuild on every save would cost a compile per keystroke.
+ *
+ * An import is the app's own when it names a file that exists from the importing file's folder,
+ * which is how Tailwind tries it first.
+ */
+export async function cssInputs(entry: string): Promise<string[]> {
+  const found = new Set<string>();
+  async function visit(file: string): Promise<void> {
+    if (found.has(file)) return;
+    found.add(file);
+    const source = await readFile(file, "utf-8").catch(() => "");
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, specifier] of code.matchAll(/@import\s+(?:url\(\s*)?["']([^"']+)["']/g)) {
+      if (specifier === undefined) continue;
+      const target = isAbsolute(specifier) ? specifier : resolve(dirname(file), specifier);
+      if (isFile(target)) await visit(target);
+    }
+  }
+  await visit(resolve(entry));
+  return [...found];
+}
+
+function isFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
+}
+
+export interface NativeCssWatchHandlers {
+  /** A build finished. Also called for the first build. */
+  onBuild(result: NativeCssResult): void;
+  /** A build failed. Watching goes on, so fixing the file builds again. */
+  onError(error: Error): void;
+}
+
+/**
+ * Build, then build again whenever `global.css` or a file it imports changes. Stop it with
+ * `close()`. A first build that fails is reported and watched like any other, so saving the fix is
+ * enough.
+ *
+ * It watches each FOLDER and filters by name, not each file: an editor that saves by writing a new
+ * file and renaming it over the old one leaves a per-file watcher on the deleted file, which then
+ * never fires again. The import list is read again after every build, so a new token file starts
+ * being watched as soon as `global.css` imports it.
+ */
+export async function watchNativeCss(
+  options: NativeCssOptions,
+  { onBuild, onError }: NativeCssWatchHandlers,
+): Promise<{ close(): void }> {
+  const root = resolve(options.root ?? ".");
+  const entry = resolve(root, options.input ?? "global.css");
+  let watchers: FSWatcher[] = [];
+  let watched = new Set<string>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let running: Promise<void> | null = null;
+  let again = false;
+  let closed = false;
+
+  async function rewatch(): Promise<void> {
+    const inputs = await cssInputs(entry);
+    for (const watcher of watchers) watcher.close();
+    watched = new Set(inputs);
+    watchers = [...new Set(inputs.map((file) => dirname(file)))].map((folder) =>
+      watch(folder, (_event, name) => {
+        if (name !== null && watched.has(join(folder, basename(name)))) schedule();
+      }),
+    );
+  }
+
+  // One build at a time: a save during a build marks it to run once more after, so the last save
+  // always lands and two compiles never write the same files at once.
+  async function build(): Promise<void> {
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = (async () => {
+      do {
+        again = false;
+        try {
+          onBuild(await buildNativeCss(options));
+        } catch (error) {
+          onError(error instanceof Error ? error : new Error(String(error)));
+        }
+        if (!closed) await rewatch();
+      } while (again && !closed);
+    })().finally(() => {
+      running = null;
+    });
+    return running;
+  }
+
+  // Editors fire several events for one save. One build per burst.
+  function schedule(): void {
+    clearTimeout(timer);
+    timer = setTimeout(() => void build(), 50);
+  }
+
+  await build();
+  return {
+    close() {
+      closed = true;
+      clearTimeout(timer);
+      for (const watcher of watchers) watcher.close();
+    },
+  };
 }

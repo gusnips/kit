@@ -128,7 +128,9 @@ Five things worth knowing:
   `package.json`: a devDependency is not enough, because react-native-css loads the copy under
   `@expo/metro-config` first.
 - **A `className` change hot-reloads.** Only a change to `global.css` or your tokens needs the
-  build to run again.
+  build to run again. While you work on those, keep `gusnips-native-css --watch` running beside
+  Metro: it builds again when `global.css` or a file it imports changes (your token files, followed
+  through their own imports), and not when you edit a component.
 - **There is no global font.** react-native-css drops element and `*` selectors, so a text without
   a `font-*` class renders in the system font.
 
@@ -149,7 +151,8 @@ each class compiles to. The colours come from the stylesheet itself, so a change
 icons with the text. Tailwind writes only classes it finds in your files, so keep each palette
 class in your source; the build stops and names any it cannot find.
 
-From a script, the same build is `buildNativeCss({ palette })` from `@gusnips/native/css`.
+From a script, the same build is `buildNativeCss({ palette })` from `@gusnips/native/css`, and the
+watch is `watchNativeCss(options, { onBuild, onError })`.
 
 ## Streams
 
@@ -293,6 +296,20 @@ and under the default flow that URL carries the refresh token.
 - **Keep React at one version in the whole repo**, with the root `workspaces.catalog`. The Metro
   resolver protects the bundle from bun's store layout; the catalog stops the versions drifting in
   the first place.
+
+## Testing an app that uses this
+
+Mock the kit's import, not `react-native` under it:
+
+```ts
+vi.mock("@gusnips/native/network", () => ({ useIsOffline: () => false }));
+vi.mock("@gusnips/native/query", () => ({ installQueryManagers: () => {} }));
+```
+
+Vitest runs a package from `node_modules` as it is, outside its own module graph, so a
+`vi.mock("react-native")` or `vi.mock("@react-native-community/netinfo")` in your test never
+reaches the imports inside `@gusnips/native`. Those load the real packages, which do not run under
+Node. Mocking the subpath your code imports replaces the whole thing, and nothing under it loads.
 
 ## Why the dependencies are peers
 

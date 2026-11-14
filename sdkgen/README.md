@@ -5,8 +5,10 @@ names, the doc text and anything written by hand. This package writes the rest, 
 parts that are easy to get wrong.
 
 ```bash
-bun add -d @gusnips/sdkgen prettier
+bun add -d @gusnips/sdkgen
 ```
+
+Writing the files also needs a formatter, `oxfmt` or `prettier` (see [Writing the files](#writing-the-files)).
 
 ```ts
 import { typeOf } from "@gusnips/sdkgen";
@@ -259,10 +261,21 @@ if (stale.length > 0) {
 ```
 
 `files` maps each path to its text. A relative path starts from `root`, and `stale` and `written`
-list paths the way `files` spells them. Each file is formatted with the prettier config for its
-path before it is compared or written, so `prettier --check` and `--check` always agree. With
-`check`, nothing is written. A file it cannot read, for a reason other than not existing, is an
-error and not "out of date".
+list paths the way `files` spells them. With `check`, nothing is written. A file it cannot read, for
+a reason other than not existing, is an error and not "out of date".
+
+### The formatter
+
+Each file is formatted before it is compared or written, so your own format check and `--check`
+always agree about it. The repo picks the formatter, and there is no option for it:
+
+- If an `.oxfmtrc.json` or `.oxfmtrc.jsonc` is in a folder above the file, it runs your repo's
+  `oxfmt` (`node_modules/.bin/oxfmt`, found from `root`), and oxfmt reads that config. Without
+  `oxfmt` installed it stops and says to add it: `bun add -d oxfmt`.
+- Otherwise it uses prettier with the config that applies at the file's path. Prettier is an
+  optional peer: it loads only on this path, so a repo that uses oxfmt does not need it.
+
+If a repo has both, oxfmt wins. That is a repo part way through the move from prettier.
 
 ## Rules
 

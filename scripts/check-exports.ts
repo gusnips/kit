@@ -2,7 +2,9 @@
 /**
  * Entry-point weight check — invariant 15, stated as something a machine can fail.
  *
- * **The rule: a peer marked `optional` must not be reachable from the package's main entry.**
+ * **The rule: a peer marked `optional` must not be reachable from the package's main entry.** The
+ * one exception is a named one, `LAZY_PEERS` below: a package that loads the peer with
+ * `await import()` and is never bundled.
  *
  * An optional peer the barrel imports anyway is not optional. It is a required peer whose error
  * moved from install time (where a package manager explains it) to the adopter's first build
@@ -45,6 +47,19 @@ const PACKAGES = [
   "server",
 ];
 
+/**
+ * Optional peers a package may load with `await import()` from its main entry, by package name.
+ *
+ * The rule above exists so that a bundler never meets an import the adopter did not install. A
+ * generator script is not bundled, and which formatter it needs is known only at run time, from
+ * the repo's own config files: `@gusnips/sdkgen` reads `.oxfmtrc.json` and otherwise uses prettier.
+ * Only a dynamic import is let through. A static one still fails, and so does every package that
+ * is not named here.
+ */
+const LAZY_PEERS: Record<string, readonly string[]> = {
+  "@gusnips/sdkgen": ["prettier"],
+};
+
 interface PackageJson {
   name: string;
   exports?: Record<string, string | Record<string, string>>;
@@ -62,8 +77,12 @@ function targetsOf(entry: string | Record<string, string>): string[] {
   return typeof entry === "string" ? [entry] : Object.values(entry);
 }
 
+/** How a file reaches a package: loaded with the file, or only when the code that asks runs. */
+type Load = "static" | "dynamic";
+
 /**
- * Every bare specifier reachable from `entry` by following relative imports.
+ * Every bare specifier reachable from `entry` by following relative imports, and how each is loaded
+ * (static wins when a package is reached both ways).
  *
  * Resolution is deliberately dumb: emitted ESM from `tsc` with
  * `rewriteRelativeImportExtensions` always writes a real `./x.js`, so there is no extension
@@ -72,8 +91,8 @@ function targetsOf(entry: string | Record<string, string>): string[] {
 async function bareImports(
   entry: string,
   seen = new Set<string>(),
-  found = new Set<string>(),
-): Promise<Set<string>> {
+  found = new Map<string, Load>(),
+): Promise<Map<string, Load>> {
   const abs = resolve(entry);
   if (seen.has(abs)) return found;
   seen.add(abs);
@@ -81,11 +100,14 @@ async function bareImports(
   const source = await readFile(abs, "utf-8").catch(() => null);
   if (source === null) return found;
 
-  for (const [, specifier] of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
-    // The pattern's one group always captures; this only tells the compiler so.
+  for (const [, call, specifier] of source.matchAll(
+    /(?:from|import)\s*(\()?\s*["']([^"']+)["']/g,
+  )) {
+    // The pattern's second group always captures; this only tells the compiler so.
     if (specifier === undefined) continue;
     if (specifier.startsWith(".")) await bareImports(resolve(dirname(abs), specifier), seen, found);
-    else found.add(specifier);
+    else if (call === undefined) found.set(specifier, "static");
+    else if (!found.has(specifier)) found.set(specifier, "dynamic");
   }
   return found;
 }
@@ -131,8 +153,9 @@ async function main(): Promise<void> {
     if (!js) continue;
 
     const reachable = await bareImports(join(dir, js));
-    for (const specifier of reachable) {
+    for (const [specifier, load] of reachable) {
       const owner = packageOf(specifier);
+      if (load === "dynamic" && LAZY_PEERS[manifest.name]?.includes(owner)) continue;
       if (optional.includes(owner))
         problems.push(
           `${manifest.name}: "." reaches optional peer "${owner}" (as "${specifier}") — ` +

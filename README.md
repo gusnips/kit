@@ -35,11 +35,11 @@ For the frontend:
 
 For the server:
 
-| Package                                 | What it is                                                    | Needs      |
-| --------------------------------------- | ------------------------------------------------------------- | ---------- |
-| [`@gusnips/migrate`](migrate/README.md) | a SQL migration runner, a type generator, a Supabase stand-in | `pg`       |
-| [`@gusnips/server`](server/README.md)   | errors, the response envelope, logging, and the API's edge    | nothing    |
-| [`@gusnips/sdkgen`](sdkgen/README.md)   | the parts of a script that writes your API's TypeScript SDK   | `prettier` |
+| Package                                 | What it is                                                    | Needs                 |
+| --------------------------------------- | ------------------------------------------------------------- | --------------------- |
+| [`@gusnips/migrate`](migrate/README.md) | a SQL migration runner, a type generator, a Supabase stand-in | `pg`                  |
+| [`@gusnips/server`](server/README.md)   | errors, the response envelope, logging, and the API's edge    | nothing               |
+| [`@gusnips/sdkgen`](sdkgen/README.md)   | the parts of a script that writes your API's TypeScript SDK   | `oxfmt` or `prettier` |
 
 For any repo:
 

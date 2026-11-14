@@ -130,3 +130,26 @@ export function createNativeTheme({
 
   return { useTheme, setMode, getSnapshot, start };
 }
+
+/**
+ * The colours for the theme on screen, out of the `{ light, dark }` that `gusnips-native-css
+ * --palette` writes to `colors.ts`. For what cannot take a `className`: the React Navigation theme,
+ * a `RefreshControl` tint, the status bar. It re-renders when the theme changes, the OS's
+ * included while the mode is "system".
+ *
+ * ```ts
+ * import { COLORS } from "./generated/colors";
+ *
+ * const colors = useThemeColors(theme, COLORS);
+ * <RefreshControl tintColor={colors.muted} />;
+ * ```
+ *
+ * Any `Theme` fits, the web's from `@gusnips/react/theme` too. Outside React, read
+ * `COLORS[theme.getSnapshot().resolved]`.
+ */
+export function useThemeColors<C>(
+  theme: Pick<Theme, "useTheme">,
+  colors: { readonly light: C; readonly dark: C },
+): C {
+  return colors[theme.useTheme().resolved];
+}

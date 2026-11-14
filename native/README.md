@@ -22,16 +22,16 @@ meet at launch.
 
 ## What is in it
 
-| Import                     | What it does                                                   | Also needs                                            |
-| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------- |
-| `@gusnips/native`          | `openSseStream`: server-sent events over XHR                   | nothing more                                          |
-| `@gusnips/native/theme`    | `createNativeTheme`: light, dark or system, remembered         | `@react-native-async-storage/async-storage`           |
-| `@gusnips/native/network`  | `useIsOffline`, `isDeviceOffline`                              | `@react-native-community/netinfo`                     |
-| `@gusnips/native/query`    | `installQueryManagers`: React Query on app focus and network   | `@tanstack/react-query`, netinfo                      |
-| `@gusnips/native/i18n`     | `createNativeLanguage`: the phone's language, or the saved one | `react-native-localize`, async-storage, `i18next`     |
-| `@gusnips/native/supabase` | `supabaseAuthStorage`: where supabase-js keeps the session     | async-storage, `@supabase/supabase-js`                |
-| `@gusnips/native/metro`    | `nativeMetroConfig`, for `metro.config.js`                     | nothing more                                          |
-| `@gusnips/native/css`      | `buildNativeCss` and the `gusnips-native-css` command          | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
+| Import                     | What it does                                                             | Also needs                                            |
+| -------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `@gusnips/native`          | `openSseStream`: server-sent events over XHR                             | nothing more                                          |
+| `@gusnips/native/theme`    | `createNativeTheme`, `useThemeColors`: light, dark or system, remembered | `@react-native-async-storage/async-storage`           |
+| `@gusnips/native/network`  | `useIsOffline`, `isDeviceOffline`                                        | `@react-native-community/netinfo`                     |
+| `@gusnips/native/query`    | `installQueryManagers`: React Query on app focus and network             | `@tanstack/react-query`, netinfo                      |
+| `@gusnips/native/i18n`     | `createNativeLanguage`: the phone's language, or the saved one           | `react-native-localize`, async-storage, `i18next`     |
+| `@gusnips/native/supabase` | `supabaseAuthStorage`: where supabase-js keeps the session               | async-storage, `@supabase/supabase-js`                |
+| `@gusnips/native/metro`    | `nativeMetroConfig`, for `metro.config.js`                               | nothing more                                          |
+| `@gusnips/native/css`      | `buildNativeCss` and the `gusnips-native-css` command                    | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
 
 Every app needs `react`, `react-native`, `@gusnips/react` and `@gusnips/http`. The rest are
 optional: you install one only when you import the line that uses it. Most of them carry native
@@ -151,6 +151,33 @@ each class compiles to. The colours come from the stylesheet itself, so a change
 icons with the text. Tailwind writes only classes it finds in your files, so keep each palette
 class in your source; the build stops and names any it cannot find.
 
+If your classes paint CSS variables that change with the theme (`bg-surface` is
+`var(--surface)`, set again under `prefers-color-scheme: dark`), a class has no hex of its own to
+read. Name the variable instead:
+
+```json
+{ "canvas": "--surface", "text": "--ink" }
+```
+
+The build reads both values from the compiled stylesheet, follows a variable that points at
+another, and stops on one it cannot find. A variable that never changes is written into the
+classes and has no entry of its own, so name a class for that one.
+
+Then read the colours for the theme on screen with `useThemeColors`, beside `createNativeTheme`:
+
+```ts
+import { useThemeColors } from "@gusnips/native/theme";
+import { COLORS } from "./generated/colors";
+
+const colors = useThemeColors(theme, COLORS);
+
+<NavigationContainer theme={{ ...DefaultTheme, colors: { ...DefaultTheme.colors, background: colors.canvas } }} />;
+<RefreshControl tintColor={colors.text} />;
+```
+
+It re-renders when the theme changes, including the phone's own switch while the mode is
+"system". Outside React, `COLORS[theme.getSnapshot().resolved]` is the same answer.
+
 From a script, the same build is `buildNativeCss({ palette })` from `@gusnips/native/css`, and the
 watch is `watchNativeCss(options, { onBuild, onError })`.
 
@@ -267,6 +294,17 @@ At launch, call `language.restore()`. From your language picker, call `language.
   the person's choice, and the app would ignore the phone from then on.
 
 ## Supabase
+
+supabase-js needs the standard `URL` and `URLSearchParams`, and React Native 0.86 has its own
+smaller ones (they parse with regular expressions, and `search` is the only part you can set). The
+first adopter's sign-in screen needed the polyfill. Install `react-native-url-polyfill` and import
+it as the FIRST line of `index.js`, before anything creates the client:
+
+```js
+// index.js
+import "react-native-url-polyfill/auto";
+import { AppRegistry } from "react-native";
+```
 
 ```ts
 import { supabaseAuthStorage } from "@gusnips/native/supabase";

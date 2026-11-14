@@ -91,11 +91,17 @@ const run = (command: string, args: string[], cwd: string, timeout?: number) =>
     timeout,
   });
 
-/** Every file reachable from `entry` through relative imports, itself included. */
+/**
+ * Every file reachable from `entry` through relative imports, itself included. Comments are
+ * stripped first: tsc keeps JSDoc, and a usage example in one (`import { COLORS } from
+ * "./generated/colors"`) names a file of the adopter's, not of this package.
+ */
 async function relativeGraph(entry: string, seen = new Set<string>()): Promise<string[]> {
   if (seen.has(entry)) return [];
   seen.add(entry);
-  const source = await readFile(entry, "utf8");
+  const source = (await readFile(entry, "utf8"))
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
   for (const [, specifier] of source.matchAll(/(?:from|import)\s*\(?\s*["'](\.[^"']+)["']/g))
     if (specifier !== undefined) await relativeGraph(join(dirname(entry), specifier), seen);
   return [...seen];

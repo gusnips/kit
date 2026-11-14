@@ -1,12 +1,14 @@
 import {
   isAuthError,
   isAuthRetryableFetchError,
+  type AuthError,
   type SignOut,
   type SupabaseClient,
   type SupabaseClientOptions,
   type SupportedStorage,
 } from "@supabase/supabase-js";
 import { SIGN_OUT_TIMEOUT_MS, type RefreshResult, type SessionAdapter } from "./api-client.ts";
+import { ApiError } from "./api-error.ts";
 
 interface SupabaseSessionResult {
   data: { session: { access_token: string } | null };
@@ -106,6 +108,79 @@ const CALLBACK_URL_ANSWERS: ReadonlySet<string> = new Set([
   "AuthImplicitGrantRedirectError",
   "AuthPKCEGrantCodeExchangeError",
 ]);
+
+/**
+ * Every code the installed auth-js names, read off its own `AuthError["code"]` type rather than
+ * copied: 89 of them at 2.119.0, from `invalid_credentials` and `otp_expired` to the MFA family.
+ * Type your arms with it, `Partial<Record<AuthErrorCode, ErrorArm>>`, and a code that does not
+ * exist is a compile error at the arm. A newer server can still send one this list lacks, which is
+ * what the describer's `fallback` is for.
+ */
+export type AuthErrorCode = KnownLiteral<Exclude<AuthError["code"], undefined>>;
+// auth-js types the field `ErrorCode | (string & {})`. `string extends T` is true only for that
+// open half, so this keeps the named codes and drops the rest. `Exclude`, not `NonNullable`: that
+// one intersects with `{}`, and the literals then fold into `string & {}` before this sees them.
+type KnownLiteral<T> = T extends string ? (string extends T ? never : T) : never;
+
+/**
+ * A supabase-js auth error as the API client's `ApiError`, so `createErrorDescriber` explains it
+ * with the same arms, the same retry rule and the same recovery control as any refusal from your
+ * own API. Anything else comes back untouched.
+ *
+ * ```ts
+ * const { error } = await supabase.auth.signInWithPassword({ email, password });
+ * if (error) show(describe(apiErrorFromAuth(error)));
+ * ```
+ *
+ * Without it the describer cannot help: it reads anything that is not an `ApiError` as a request
+ * that never landed, so a wrong password said "check your connection". The web app and the phone
+ * app of one adopter each wrote the same switch over auth-js's codes to get around that.
+ *
+ * What it keeps and what it drops:
+ *
+ * - The `code`, which is what an arm switches on (`invalid_credentials`, `email_not_confirmed`,
+ *   `otp_expired`, `over_email_send_rate_limit`, `weak_password`, `same_password`, ...). Two errors
+ *   carry it elsewhere and get it back: `session_not_found`, which auth-js turns into an
+ *   `AuthSessionMissingError` with no code, and the code an email link's callback URL names
+ *   (`otp_expired` for a spent link), which auth-js puts in `details`.
+ * - The status, so the retry rule reads a 429 as a 429 and a 5xx as a 5xx. The two callback URL
+ *   errors become a 400: they are answers (see {@link isAuthOutage}), and their 500 would offer
+ *   "try again" over a dead link.
+ * - `weak_password`'s `reasons` (`length`, `characters`, `pwned`), as `details.reasons`, because
+ *   they say what to change.
+ * - NOT GoTrue's `message`. It is English only and often names the wrong cause, and the
+ *   describer's built-in arm would put it on screen. A code with no arm reads as your
+ *   `unexpected` copy instead. Log the original error before converting it if you want the text.
+ *
+ * A failure where nothing came back (status 0) or the body could not be read
+ * (`AuthUnknownError`, no status) is left as it is: the describer already reads that as a request
+ * that never landed, which is the honest reading of it.
+ */
+export function apiErrorFromAuth<E>(error: E): E | ApiError {
+  if (!isAuthError(error) || !error.status) return error;
+  const code =
+    error.code ??
+    (error.name === "AuthSessionMissingError" ? "session_not_found" : codeInCallbackUrl(error));
+  const reasons = "reasons" in error && Array.isArray(error.reasons) ? error.reasons : undefined;
+  const status = CALLBACK_URL_ANSWERS.has(error.name) ? 400 : error.status;
+  return new ApiError(
+    status,
+    code === undefined
+      ? null
+      : { code, message: "", ...(reasons !== undefined && { details: { reasons } }) },
+  );
+}
+
+/** The `error_code` a sign-in's callback URL carried, which auth-js keeps in `details`. */
+function codeInCallbackUrl(error: AuthError): string | undefined {
+  if (error.name !== "AuthImplicitGrantRedirectError" || !("details" in error)) return undefined;
+  const { details } = error;
+  if (typeof details !== "object" || details === null || !("code" in details)) return undefined;
+  // auth-js writes this placeholder when the URL named no code.
+  return typeof details.code === "string" && details.code !== "unspecified_code"
+    ? details.code
+    : undefined;
+}
 
 function reachedAuth(error: unknown): boolean {
   // Measured across the fleet: four backends answered 401 to their own auth provider's 500,

@@ -5,7 +5,7 @@
 // with native code or a build tool in it, and an app installs that package only by importing the
 // thing that uses it:
 //
-//   @gusnips/native/theme     createNativeTheme        → @react-native-async-storage/async-storage
+//   @gusnips/native/theme     createNativeTheme, useThemeColors → @react-native-async-storage/async-storage
 //   @gusnips/native/network   useIsOffline             → @react-native-community/netinfo
 //   @gusnips/native/query     installQueryManagers     → @tanstack/react-query, netinfo
 //   @gusnips/native/i18n      createNativeLanguage     → react-native-localize, async-storage

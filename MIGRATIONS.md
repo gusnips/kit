@@ -182,7 +182,9 @@ siblings in one tree and only one of them ever got the fix.
   password says "check your connection". This repo converts at its own edge — the `code` into an
   `ApiError`, the message dropped, because GoTrue's is English-only and often names the wrong
   cause — and resolves it under a second prefix. One adopter does not make that the kit's job;
-  the second repo on Supabase Auth that needs the same six lines does.
+  the second repo on Supabase Auth that needs the same six lines does. It arrived: one adopter's
+  web app and phone app had each written the switch, and the conversion is now `apiErrorFromAuth`
+  in `@gusnips/react/supabase`, with `AuthErrorCode` read off the installed auth-js's own type.
 
 ## Migration 3 (−108 lines, 4 commits)
 

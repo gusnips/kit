@@ -11,16 +11,19 @@
  * A second transport has a cost the kit already paid for once: it drifts from the API client. So
  * this one keeps to the client's contract where it can. A refused handshake throws the client's own
  * `ApiError`, read from the same envelope and the same `Retry-After` header, so a 402 on a stream
- * gets the sentence and the button any other 402 in the app gets. The 401 refresh is the app's own,
- * handed in as `refreshHeaders`, so a stream starting mid-load refreshes through the client's single
- * flight instead of racing it.
+ * gets the sentence and the button any other 402 in the app gets. The token and the 401 refresh come
+ * from the same `SessionAdapter` the client is built on. Single flight is the adapter's job and this
+ * adds none of its own, so a stream opening mid-load joins the refresh every other request is
+ * waiting on instead of racing it. GoTrue rotates the refresh token on use, and the loser of that race would sign the
+ * person out. The donor kept a hand-rolled single flight beside its client for this; it existed only
+ * because the adapter did not have one.
  *
  * No reconnect. The donor's chat store had its own recovery (it refetches the transcript when a
  * stream breaks), and a loop here would have been a second one nobody asked for.
  */
 import { isApiError } from "@gusnips/http";
 import { parseRetryAfter } from "@gusnips/http/retry";
-import { ApiError, createSseParser, type SseFrame } from "@gusnips/react";
+import { ApiError, createSseParser, type SessionAdapter, type SseFrame } from "@gusnips/react";
 
 export interface SseStreamOptions {
   /** The whole address of the stream, `https://api.example.com/chat/stream`. */
@@ -29,16 +32,13 @@ export interface SseStreamOptions {
   method?: "GET" | "POST";
   body?: unknown;
   /**
-   * The headers for the first attempt, usually `Authorization`. Called once, right before the
-   * request opens, so a token read here is the current one.
+   * The adapter your `createApiClient` uses. Its token goes out as `Authorization: Bearer`, and a
+   * 401 calls its `refresh()` once and opens again with the new token. Leave it out for a stream
+   * that needs no sign-in.
    */
-  headers?: () => Promise<Record<string, string>>;
-  /**
-   * Called once, when the server answers 401: refresh the session and hand back fresh headers to
-   * retry with, or `null` when there is no session to refresh. Pass the API client's own refresh,
-   * so the stream and every other request share one refresh.
-   */
-  refreshHeaders?: () => Promise<Record<string, string> | null>;
+  session?: SessionAdapter;
+  /** Extra headers, computed when the request opens, like the API client's `headers`. */
+  headers?: () => Record<string, string>;
   /** One frame off the wire. `data` is raw text: parse it the way your server writes it. */
   onFrame: (frame: SseFrame) => void;
   /**
@@ -66,8 +66,7 @@ const REQUEST_ID_HEADER = "x-request-id";
  * const stream = openSseStream({
  *   url: `${API_URL}/chat/stream`,
  *   body: { message },
- *   headers: authHeaders,
- *   refreshHeaders: refreshAuthHeaders,
+ *   session, // the same adapter createApiClient uses
  *   onFrame: ({ event, data }) => handle(event, JSON.parse(data)),
  * });
  * ```
@@ -76,16 +75,7 @@ const REQUEST_ID_HEADER = "x-request-id";
  * stream. A chat turn is fine. A feed left open all day is not; that needs a native streaming module.
  */
 export function openSseStream(options: SseStreamOptions): SseStream {
-  const {
-    url,
-    method = "POST",
-    body,
-    headers,
-    refreshHeaders,
-    onFrame,
-    onError,
-    onClose,
-  } = options;
+  const { url, method = "POST", body, session, headers, onFrame, onError, onClose } = options;
   let aborted = false;
   let refreshed = false;
   let current: XMLHttpRequest | null = null;
@@ -98,7 +88,7 @@ export function openSseStream(options: SseStreamOptions): SseStream {
   const asError = (thrown: unknown, fallback: string) =>
     thrown instanceof Error ? thrown : new Error(fallback);
 
-  function start(sent: Record<string, string>): void {
+  function start(token: string | null): void {
     if (aborted) return;
     const xhr = new XMLHttpRequest();
     current = xhr;
@@ -110,7 +100,9 @@ export function openSseStream(options: SseStreamOptions): SseStream {
     xhr.open(method, url);
     if (method !== "GET") xhr.setRequestHeader("Content-Type", "application/json");
     xhr.setRequestHeader("Accept", "text/event-stream");
-    for (const [name, value] of Object.entries(sent)) xhr.setRequestHeader(name, value);
+    for (const [name, value] of Object.entries(headers?.() ?? {}))
+      xhr.setRequestHeader(name, value);
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
     // `responseText` is everything so far, not the new part. Feed only what was not fed yet, or
     // every frame is delivered again on every progress event.
@@ -124,11 +116,14 @@ export function openSseStream(options: SseStreamOptions): SseStream {
 
     xhr.onload = () => {
       if (aborted) return;
-      if (xhr.status === 401 && refreshHeaders && !refreshed) {
+      if (xhr.status === 401 && session && !refreshed) {
         refreshed = true;
         const refused = refusalOf(xhr);
-        refreshHeaders().then(
-          (fresh) => (fresh ? start(fresh) : fail(refused)),
+        // No token back means no session to retry with, whether auth refused or never answered.
+        // The stream ends with the 401; signing out stays the API client's call, so a dead session
+        // has one place that ends it.
+        session.refresh().then(
+          ({ token: fresh }) => (fresh ? start(fresh) : fail(refused)),
           (thrown: unknown) => fail(asError(thrown, "Could not refresh the session")),
         );
         return;
@@ -149,7 +144,7 @@ export function openSseStream(options: SseStreamOptions): SseStream {
     xhr.send(method === "GET" ? null : JSON.stringify(body ?? {}));
   }
 
-  (headers ? headers() : Promise.resolve({})).then(start, (thrown: unknown) =>
+  (session ? session.getToken() : Promise.resolve(null)).then(start, (thrown: unknown) =>
     fail(asError(thrown, "Could not read the session")),
   );
 

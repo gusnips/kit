@@ -1,4 +1,4 @@
-import { ApiError, type SseFrame } from "@gusnips/react";
+import { ApiError, type SessionAdapter, type SseFrame } from "@gusnips/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openSseStream, type SseStreamOptions } from "./sse.ts";
 
@@ -39,6 +39,15 @@ class FakeXhr {
 
 const settle = () => new Promise((done) => setTimeout(done, 0));
 
+/** A session whose refresh hands out `fresh` once, the way the API client's adapter does. */
+function sessionWith(fresh: string | null): SessionAdapter & { refresh: ReturnType<typeof vi.fn> } {
+  return {
+    getToken: async () => "old",
+    refresh: vi.fn(async () => ({ token: fresh, reachedAuth: true })),
+    signOut: async () => {},
+  };
+}
+
 function open(overrides: Partial<SseStreamOptions> = {}) {
   const frames: SseFrame[] = [];
   const onError = vi.fn<(error: Error) => void>();
@@ -46,7 +55,8 @@ function open(overrides: Partial<SseStreamOptions> = {}) {
   const stream = openSseStream({
     url: "https://api.test/stream",
     body: { message: "hi" },
-    headers: async () => ({ Authorization: "Bearer old" }),
+    session: sessionWith("new"),
+    headers: () => ({ "Accept-Language": "pt-BR" }),
     onFrame: (frame) => frames.push(frame),
     onError,
     onClose,
@@ -69,6 +79,7 @@ describe("openSseStream", () => {
     expect(xhr.requestHeaders).toMatchObject({
       Authorization: "Bearer old",
       Accept: "text/event-stream",
+      "Accept-Language": "pt-BR",
     });
     expect(xhr.sent).toBe('{"message":"hi"}');
 
@@ -121,9 +132,9 @@ describe("openSseStream", () => {
     expect(onError.mock.calls[0]![0]).toMatchObject({ status: 502, code: undefined });
   });
 
-  it("refreshes once on a 401 and opens again with the fresh headers", async () => {
-    const refreshHeaders = vi.fn(async () => ({ Authorization: "Bearer new" }));
-    const { frames, onError } = open({ refreshHeaders });
+  it("refreshes once through the session on a 401 and opens again with the new token", async () => {
+    const session = sessionWith("new");
+    const { frames, onError } = open({ session });
     await settle();
     FakeXhr.opened[0]!.status = 401;
     FakeXhr.opened[0]!.onload?.();
@@ -135,14 +146,14 @@ describe("openSseStream", () => {
     retry.onload?.();
     await settle();
     // Once: a second 401 is the answer, not a reason to refresh again.
-    expect(refreshHeaders).toHaveBeenCalledOnce();
+    expect(session.refresh).toHaveBeenCalledOnce();
     expect(FakeXhr.opened).toHaveLength(2);
     expect(onError.mock.calls[0]![0]).toMatchObject({ status: 401 });
     expect(frames).toEqual([]);
   });
 
   it("ends with the 401 when there is no session to refresh", async () => {
-    const { onError, onClose } = open({ refreshHeaders: async () => null });
+    const { onError, onClose } = open({ session: sessionWith(null) });
     await settle();
     FakeXhr.opened[0]!.status = 401;
     FakeXhr.opened[0]!.onload?.();

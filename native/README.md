@@ -162,8 +162,7 @@ import { openSseStream } from "@gusnips/native";
 const stream = openSseStream({
   url: `${API_URL}/chat/stream`,
   body: { message },
-  headers: authHeaders,
-  refreshHeaders: refreshAuthHeaders,
+  session, // the SessionAdapter your createApiClient uses
   onFrame: ({ event, data }) => handle(event, JSON.parse(data)),
   onError: showError,
 });
@@ -175,9 +174,12 @@ stream.abort(); // when the screen closes
   request id and the `Retry-After` wait. So a 402 on a stream gets the same sentence and button as
   any other 402. A lost connection is a plain `Error`, which the describer reads as "never
   landed".
-- On a 401 it calls `refreshHeaders` once and opens again. Pass the refresh your API client uses,
-  so a stream and a page load do not refresh the session at the same time. Return `null` when
-  there is no session, and the stream fails with the 401.
+- It sends the session's token, and on a 401 it calls the session's `refresh()` once and opens
+  again. Pass the same adapter your API client uses: its refresh runs once for everyone, so a
+  stream and a page load do not refresh at the same time (the auth server rotates the refresh
+  token, and the loser of that race signs the person out). No token back, and the stream fails
+  with the 401; ending the session stays the API client's job. `headers` adds anything else, like
+  the client's own option.
 - `data` is raw text. Parse it the way your server writes it.
 - No reconnect. Reopen the stream from where your screen knows how to recover.
 - The whole response stays in memory until the stream ends. Fine for a chat answer; not for a feed

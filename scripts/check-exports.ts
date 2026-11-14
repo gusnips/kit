@@ -33,6 +33,7 @@ import { dirname, join, resolve } from "node:path";
 const ROOT = join(import.meta.dirname, "..");
 const PACKAGES = [
   "tokens",
+  "oxlint",
   "http",
   "locale",
   "br",

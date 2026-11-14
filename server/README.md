@@ -2144,7 +2144,8 @@ void push.send(user.id, { title: "Your report is ready", data: { reportId } });
 ```
 
 `pushDevices` is your device table behind two functions, `listForUser(userId)` and
-`remove(token)`. The table and the route that fills it stay in your app.
+`remove(token)`. Keep it in Postgres with `createPgPushDevices` (below), or write the two
+functions over any store. The route that fills it stays in your app.
 
 - **Make each transport once per process.** The APNs one keeps a connection to Apple and a signed
   token for 50 minutes; the FCM one keeps Google's access token for 55. Made per job, each would
@@ -2166,6 +2167,43 @@ void push.send(user.id, { title: "Your report is ready", data: { reportId } });
 - **Register a device on its token**: `ON CONFLICT (token) DO UPDATE SET user_id = excluded.user_id`.
   A phone that signs in to another account then stops getting the first account's pushes.
 - Each request waits 10 seconds at most. `data` values are strings, and `badge` is for iOS only.
+
+### Devices in Postgres
+
+```ts
+import { createPgPushDevices } from "@gusnips/server/pg";
+
+const pushDevices = createPgPushDevices(pool, { table: "app.push_devices" });
+
+// The route the app calls after a sign-in, and at each launch:
+await pushDevices.register({ userId: user.id, token, platform: "ios" });
+// And on sign-out, from that phone:
+await pushDevices.unregister(user.id, token);
+```
+
+Behind `/pg`, which already needs `pg`, so `/push` stays free of it. The table, in your migrations:
+
+```sql
+CREATE TABLE app.push_devices (
+  token        text PRIMARY KEY,
+  user_id      uuid NOT NULL,
+  platform     text NOT NULL CHECK (platform IN ('ios', 'android')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX push_devices_user_id_idx ON app.push_devices (user_id);
+```
+
+- **The token is the key, not the person.** Registering a token that is on file moves it to the new
+  person, so a phone that signs in to another account stops getting the first one's pushes.
+- **Give `user_id` your users' type and a foreign key** to your users table with `ON DELETE
+  CASCADE`, so a deleted account takes its phones with it.
+- **`unregister` deletes only the caller's own row.** A sign-out that names somebody else's token
+  deletes nothing.
+- **`register` moves `last_seen_at` to now**, so a phone the app has not opened in months can be
+  pruned by a job of yours. Nothing here prunes on its own.
+- **The table name is written into the SQL**, so it must be a name or `schema.name`; anything else
+  throws when you create the repository.
 
 ### Watching each request
 

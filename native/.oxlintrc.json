@@ -1,5 +1,10 @@
 {
   "extends": ["../oxlint/react.json"],
   "plugins": [],
-  "ignorePatterns": ["**/dist/**", "**/node_modules/**"]
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**"],
+  "rules": {
+    "react-hooks-js/purity": "off",
+    "react-hooks-js/config": "off",
+    "react-hooks-js/gating": "off"
+  }
 }

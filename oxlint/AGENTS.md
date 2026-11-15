@@ -3,8 +3,9 @@ Rules for `@gusnips/oxlint`. The repo-wide rules are in the root `AGENTS.md`.
 # What the presets are, measured
 
 Two JSON files, our plugin and a one-line hooks-library re-export. The JSON files are the lint core
-every app repeated in its ESLint config (`js` and `typescript-eslint` `recommended`, `no-explicit-any`, `no-unused-vars` with
-`^_`, `no-undef` off, `eslint-plugin-react-hooks` 7), written once for oxlint. Anything a repo wrote
+every app repeated in its ESLint config (`js` and `typescript-eslint` `recommended`,
+`no-explicit-any`, `no-unused-vars` with `^_`, `no-undef` off, `eslint-plugin-react-hooks` 7), written
+once for oxlint. Anything a repo wrote
 for itself (`no-restricted-imports`, `no-console`, type-aware rules) stays out. A rule goes in only
 when most repos had it. The plugin (`plugin.js`, exported as `@gusnips/oxlint/plugin`) is the one
 exception, see below.
@@ -54,6 +55,10 @@ Measured on oxlint 1.93.0, 2026-11-15:
   enable its rules only in their existing frontend overrides. The check proves impure calls in
   `client/` report while the same calls in `server/` stay quiet, at root and nested workspace.
   `base.json` stays unchanged; loading the entry alone enables nothing.
+- Kit's own JS checks keep the original `react/**/*.{ts,tsx}` scope. The root config enables them
+  only in that override, and `react/.oxlintrc.json` inherits them. `native/.oxlintrc.json` explicitly
+  disables only these three new JS rules while retaining its existing native rules. The focused
+  check copies all three actual configs and proves root and nested commands keep that scope.
 
 # The plugin: the two `no-restricted-syntax` selectors
 

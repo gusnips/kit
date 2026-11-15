@@ -173,7 +173,7 @@ const NATIVE_REACT_LEVELS: Record<string, string> = {
   "react/purity": "allow",
 };
 
-const COMPILER_FIXTURE: Record<string, string> = {
+const COMPILER_FIXTURE = {
   "purity.tsx": `export function Year() {
   const year = new Date().getFullYear();
   return <p>{year}</p>;
@@ -195,7 +195,7 @@ export function External() {
   return <p>Hello</p>;
 }
 `,
-};
+} satisfies Record<string, string>;
 
 const COMPILER_DIAGNOSTICS = [
   "config.tsx:3 error react-hooks-js(config)",
@@ -510,6 +510,59 @@ const [scopedFromRoot, scopedFromWorkspace] = diagnoseWorkspace(
 const scopedWanted = COMPILER_DIAGNOSTICS.map((line) => `client/${line}`);
 report("scoped compiler, at the root", differences(scopedWanted, scopedFromRoot));
 report("scoped compiler, in a workspace", differences(scopedWanted, scopedFromWorkspace));
+
+// Kit's original hooks scope was react/, including the root command. Copy the actual root and
+// nested configs into a throwaway repo so this check also catches an accidental native/ opt-in.
+const kitRootConfig: {
+  overrides?: { files?: string[]; rules?: Record<string, string> }[];
+} = JSON.parse(readFileSync(join(PACKAGE, "..", ".oxlintrc.json"), "utf8"));
+const kitNativeConfig: { rules?: Record<string, string> } = JSON.parse(
+  readFileSync(join(PACKAGE, "..", "native", ".oxlintrc.json"), "utf8"),
+);
+const rootReactRules = kitRootConfig.overrides?.find((entry) =>
+  entry.files?.includes("react/**/*.{ts,tsx}"),
+)?.rules;
+for (const rule of ["purity", "config", "gating"]) {
+  const name = `react-hooks-js/${rule}`;
+  if (rootReactRules?.[name] !== "error" || kitNativeConfig.rules?.[name] !== "off")
+    problems.push(`kit: ${name} must be error only in react/ and off in native/`);
+}
+const kit = repoWith(kitRootConfig, SHIPPED, {
+  "react/purity.tsx": COMPILER_FIXTURE["purity.tsx"],
+  "native/purity.tsx": COMPILER_FIXTURE["purity.tsx"],
+  "http/purity.tsx": COMPILER_FIXTURE["purity.tsx"],
+});
+try {
+  symlinkSync(join(kit, "node_modules", "@gusnips", "oxlint"), join(kit, "oxlint"), "dir");
+  for (const workspace of ["react", "native"])
+    writeFileSync(
+      join(kit, workspace, ".oxlintrc.json"),
+      readFileSync(join(PACKAGE, "..", workspace, ".oxlintrc.json"), "utf8"),
+    );
+  const purityWanted = COMPILER_DIAGNOSTICS.filter((line) => line.includes("purity.tsx:"));
+  const rootWanted = purityWanted.map((line) => `react/${line}`);
+  report(
+    "kit root command",
+    differences(rootWanted, findings(kit, ".oxlintrc.json", ["react", "native", "http"])),
+  );
+  report(
+    "kit root config alone",
+    differences(
+      rootWanted,
+      findings(kit, ".oxlintrc.json", ["--disable-nested-config", "react", "native", "http"]),
+    ),
+  );
+  report(
+    "kit nested react",
+    differences(purityWanted, findings(join(kit, "react"), ".oxlintrc.json", ["purity.tsx"])),
+  );
+  report(
+    "kit nested native",
+    differences([], findings(join(kit, "native"), ".oxlintrc.json", ["purity.tsx"])),
+  );
+} finally {
+  rmSync(kit, { recursive: true, force: true });
+}
 
 if (problems.length > 0) {
   console.error(`✗ oxlint presets: ${String(problems.length)} problem(s)\n`);

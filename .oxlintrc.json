@@ -1,5 +1,16 @@
 {
   "extends": ["./oxlint/base.json"],
   "plugins": [],
-  "ignorePatterns": ["**/dist/**", "**/node_modules/**"]
+  "jsPlugins": [{ "name": "react-hooks-js", "specifier": "./oxlint/react-hooks.js" }],
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**"],
+  "overrides": [
+    {
+      "files": ["react/**/*.{ts,tsx}"],
+      "rules": {
+        "react-hooks-js/purity": "error",
+        "react-hooks-js/config": "error",
+        "react-hooks-js/gating": "error"
+      }
+    }
+  ]
 }

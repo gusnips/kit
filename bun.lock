@@ -75,7 +75,7 @@
       },
       "devDependencies": {
         "@gusnips/http": ">=0.2.0 <1",
-        "@gusnips/react": ">=0.10.0 <1",
+        "@gusnips/react": ">=0.11.1 <1",
         "@react-native-async-storage/async-storage": "^3.1.1",
         "@react-native-community/netinfo": "^12.0.1",
         "@supabase/supabase-js": "^2.113.0",
@@ -87,12 +87,13 @@
         "react-native": "0.86.2",
         "react-native-css": "3.0.7",
         "react-native-localize": "^3.7.0",
+        "react-native-webview": "^14.0.1",
         "typescript": "^7.0.2",
         "vitest": "^4.1.2",
       },
       "peerDependencies": {
         "@gusnips/http": ">=0.2.0 <1",
-        "@gusnips/react": ">=0.10.1 <1",
+        "@gusnips/react": ">=0.11.1 <1",
         "@react-native-async-storage/async-storage": ">=3",
         "@react-native-community/netinfo": ">=12",
         "@supabase/supabase-js": "^2",
@@ -103,6 +104,7 @@
         "react-native": ">=0.86",
         "react-native-css": "^3.0.7",
         "react-native-localize": ">=3",
+        "react-native-webview": ">=14",
         "tailwindcss": "^4",
       },
       "optionalPeers": [
@@ -114,6 +116,7 @@
         "i18next",
         "react-native-css",
         "react-native-localize",
+        "react-native-webview",
         "tailwindcss",
       ],
     },
@@ -1404,6 +1407,8 @@
     "react-native-css": ["react-native-css@3.0.7", "", { "dependencies": { "@types/debug": "^4.1.12", "babel-plugin-react-compiler": "^19.1.0-rc.2", "colorjs.io": "0.6.0-alpha.1", "comment-json": "^4.2.5", "debug": "^4.4.1" }, "peerDependencies": { "@expo/metro-config": ">=54", "lightningcss": ">=1.27.0", "react": ">=19", "react-native": ">=0.81" } }, "sha512-xsU9T5MleHI/DDmY72A7ZikbkDfDNkMrAEichOJW2bBUMxPzAJPrFk9ys4cXYk4gLFaR11y23EccOJ+JT6Iusw=="],
 
     "react-native-localize": ["react-native-localize@3.7.2", "", { "peerDependencies": { "react": "*", "react-native": "*", "react-native-macos": "*" }, "optionalPeers": ["react-native-macos"] }, "sha512-TAd1IbE+ida/ZqGEL1tZ2nPhOd3tLq3pSL/rgFDEVIA3hUzEhA/Eb3CXgWdqHTQn3UCiOYvRK7BtxapGgg8ySg=="],
+
+    "react-native-webview": ["react-native-webview@14.0.1", "", { "dependencies": { "escape-string-regexp": "^4.0.0", "invariant": "2.2.4" }, "peerDependencies": { "react": "*", "react-native": "*" } }, "sha512-lBUuvFk459Mo+5vUNqwzGvn+I8rDJE6zvOulG2hWWudeEOJfWTsQwOfuYnRu+27djUIXrESFfC+EQE3PGu+FWA=="],
 
     "react-refresh": ["react-refresh@0.14.2", "", {}, "sha512-jCvmsr+1IUSMUyzOkRcvnVbX3ZYC6g9TDrDbFuFmRDq7PD4yaGbLKNQL6k2jnArV8hjYxh7hVhAZB6s9HDGpZA=="],
 

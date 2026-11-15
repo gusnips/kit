@@ -123,6 +123,13 @@ selector was built first, on the Base UI `Select`, and the first adopter had no 
 native select field: of the eight products that sell, three do not use Base UI, and every one has a
 select of its own. So the rule is shared (`currencyLabel`) and the control stays the product's.
 
+`@gusnips/react/turnstile-machine` is a subpath for the reason `@gusnips/http/retry` is: two platforms
+need one rule. The states of a security check, a token that is handed out once and the five minutes
+it lasts are the same in a browser and in a phone's WebView, so they live in a file with no DOM that
+both `@gusnips/react/turnstile` and `@gusnips/native/turnstile` run. Each platform keeps only its
+driver, the code that puts Cloudflare's widget somewhere. A change to the machine moves the web check
+and the phone check together, and `react` and `native` are released together for it.
+
 `react` is the only peer `@gusnips/react`'s main entry requires, and that is deliberate rather
 than incidental: it is what makes the package importable from **React Native**, which has no
 react-dom to give. See migration 2.

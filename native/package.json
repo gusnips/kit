@@ -1,7 +1,7 @@
 {
   "name": "@gusnips/native",
   "version": "0.1.5",
-  "description": "What a bare React Native app needs beside @gusnips/react: streams over XHR, React Query on app focus and network, theme and language that remember the choice, the Supabase session storage, the Metro config for a bun monorepo, and the Tailwind to react-native-css build.",
+  "description": "What a bare React Native app needs beside @gusnips/react: streams over XHR, React Query on app focus and network, theme and language that remember the choice, the Supabase session storage, a Turnstile check that runs in a WebView, the Metro config for a bun monorepo, and the Tailwind to react-native-css build.",
   "type": "module",
   "license": "MIT",
   "author": "Gustavo Salomé",
@@ -33,6 +33,10 @@
     "./supabase": {
       "types": "./dist/supabase.d.ts",
       "default": "./dist/supabase.js"
+    },
+    "./turnstile": {
+      "types": "./dist/turnstile.d.ts",
+      "default": "./dist/turnstile.js"
     },
     "./metro": {
       "types": "./dist/node/metro.d.ts",
@@ -70,6 +74,7 @@
     "react-query",
     "i18next",
     "supabase",
+    "turnstile",
     "sse"
   ],
   "scripts": {
@@ -86,7 +91,7 @@
   },
   "peerDependencies": {
     "@gusnips/http": ">=0.2.0 <1",
-    "@gusnips/react": ">=0.10.1 <1",
+    "@gusnips/react": ">=0.11.1 <1",
     "@react-native-async-storage/async-storage": ">=3",
     "@react-native-community/netinfo": ">=12",
     "@supabase/supabase-js": "^2",
@@ -97,6 +102,7 @@
     "react-native": ">=0.86",
     "react-native-css": "^3.0.7",
     "react-native-localize": ">=3",
+    "react-native-webview": ">=14",
     "tailwindcss": "^4"
   },
   "peerDependenciesMeta": {
@@ -124,13 +130,16 @@
     "react-native-localize": {
       "optional": true
     },
+    "react-native-webview": {
+      "optional": true
+    },
     "tailwindcss": {
       "optional": true
     }
   },
   "devDependencies": {
     "@gusnips/http": ">=0.2.0 <1",
-    "@gusnips/react": ">=0.10.0 <1",
+    "@gusnips/react": ">=0.11.1 <1",
     "@react-native-async-storage/async-storage": "^3.1.1",
     "@react-native-community/netinfo": "^12.0.1",
     "@supabase/supabase-js": "^2.113.0",
@@ -142,6 +151,7 @@
     "react-native": "0.86.2",
     "react-native-css": "3.0.7",
     "react-native-localize": "^3.7.0",
+    "react-native-webview": "^14.0.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },

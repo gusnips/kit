@@ -5,7 +5,10 @@ const options = { secret: "server-secret", hostnames: ["app.example.com"], actio
 const input = { token: "browser-token", remoteIp: "192.0.2.1" };
 const passed = { success: true, hostname: "app.example.com", action: "contact" };
 
-function verifier(answer: unknown, config: Partial<TurnstileVerifierOptions> = {}) {
+function verifier(
+  answer: unknown,
+  config: Partial<Extract<TurnstileVerifierOptions, { mode?: "live" }>> = {},
+) {
   const fetcher = vi.fn<typeof fetch>(async () => Response.json(answer));
   return { verify: createTurnstileVerifier({ ...options, fetcher, ...config }), fetcher };
 }
@@ -15,6 +18,46 @@ afterEach(() => {
 });
 
 describe("createTurnstileVerifier", () => {
+  it("accepts the official dummy success shape only in explicit test-key mode", async () => {
+    // Cloudflare's documented dummy response has this hostname and no action or cdata.
+    const dummy = {
+      success: true,
+      challenge_ts: "2026-11-15T00:00:00.000Z",
+      hostname: "example.com",
+      "error-codes": [],
+    };
+    const secret = "1x0000000000000000000000000000000AA";
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(dummy));
+    const verify = createTurnstileVerifier({ mode: "test-key", secret, fetcher });
+    await expect(verify(input)).resolves.toEqual({ ok: true });
+    await expect(
+      verifier(dummy, { secret, hostnames: ["example.com"] }).verify(input),
+    ).resolves.toEqual({ ok: false, reason: "unavailable" });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("never lets real or missing secrets use test-key mode", () => {
+    const fetcher = vi.fn<typeof fetch>();
+    for (const secret of [options.secret, undefined, "", "a-real-widget-secret"])
+      expect(() => createTurnstileVerifier({ mode: "test-key", secret, fetcher })).toThrow(
+        "accepts only Cloudflare's published dummy secrets",
+      );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("also accepts the published always-fail and already-spent test secrets without passing them", async () => {
+    for (const [secret, code] of [
+      ["2x0000000000000000000000000000000AA", "invalid-input-response"],
+      ["3x0000000000000000000000000000000AA", "timeout-or-duplicate"],
+    ]) {
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        Response.json({ success: false, "error-codes": [code] }),
+      );
+      const verify = createTurnstileVerifier({ mode: "test-key", secret, fetcher });
+      await expect(verify(input)).resolves.toEqual({ ok: false, reason: "refused" });
+    }
+  });
+
   it("checks a token once, posting the secret only to Cloudflare", async () => {
     const { verify, fetcher } = verifier(passed);
     await expect(verify(input)).resolves.toEqual({ ok: true });

@@ -568,6 +568,19 @@ The result is `ok: true`, or `ok: false` with one of three reasons:
 | `unavailable`    | Cloudflare did not answer, returned an unreadable result or reported a service/configuration error. | Run no work. Preserve input and offer a retry.           |
 | `not-configured` | The secret is unset.                                                                                | Run no work. Set server config before opening this form. |
 
+For local development with [Cloudflare's published test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/),
+select `mode: "test-key"` explicitly instead of supplying `hostnames` and `action`:
+
+```ts
+const verifyLocal = createTurnstileVerifier({ mode: "test-key", secret: localTestSecret });
+```
+
+That mode accepts only the three published dummy secrets. A real or missing secret throws at
+creation. Cloudflare's dummy success answer names `example.com` and has no action, so it cannot
+prove hostname/action binding. Test those comparisons with real keys. Select this mode only for
+an explicit loopback development origin; never infer it from a missing key or an HTTP URL alone.
+Default/live mode always checks hostname and action, even when a dummy secret was supplied.
+
 The request and body read have an 8-second deadline (`timeoutMs` changes it). There is one request,
 no automatic retry. A token lasts five minutes and verifies once: every retry needs a fresh one.
 The helper logs nothing and returns no secret, token, provider body or raw error. Keep those out

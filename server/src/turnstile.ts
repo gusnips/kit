@@ -1,21 +1,40 @@
 const SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+// Public dummy secrets from Cloudflare's testing guide, never real widget credentials.
+const TEST_SECRETS = new Set([
+  "1x0000000000000000000000000000000AA",
+  "2x0000000000000000000000000000000AA",
+  "3x0000000000000000000000000000000AA",
+]);
 
 export type TurnstileVerdict =
   | { ok: true }
   | { ok: false; reason: "refused" | "unavailable" | "not-configured" };
 
-export interface TurnstileVerifierOptions {
-  /** Server-only secret. Unset returns not-configured, never a pass. */
+interface TurnstileVerifierCommon {
+  /** Server-only secret. Unset in live mode returns not-configured, never a pass. */
   secret: string | undefined;
-  /** Exact hostnames owned by this app, not request headers or caller-supplied values. */
-  hostnames: readonly string[];
-  /** The form's server-owned action, matching the browser widget. */
-  action: string;
   /** Bounds the request and response body. Defaults to 8 seconds. */
   timeoutMs?: number;
   /** A fetch implementation for a local check. Never a browser-side verifier. */
   fetcher?: typeof fetch;
 }
+
+export type TurnstileVerifierOptions = TurnstileVerifierCommon &
+  (
+    | {
+        mode?: "live";
+        /** Exact hostnames owned by this app, not request headers or caller-supplied values. */
+        hostnames: readonly string[];
+        /** The form's server-owned action, matching the browser widget. */
+        action: string;
+      }
+    | {
+        /** Only Cloudflare's published dummy secrets. Select explicitly for local development. */
+        mode: "test-key";
+        hostnames?: never;
+        action?: never;
+      }
+  );
 
 export interface TurnstileInput {
   token: string | undefined;
@@ -33,26 +52,35 @@ export type VerifyTurnstile = (input: TurnstileInput) => Promise<TurnstileVerdic
  * A service failure is not a token refusal. Neither permits mail or paid work to run. Map the
  * result to your own error, preserve the form's input and ask the browser for a fresh token.
  * No token, secret, provider body or thrown fetch error is logged or returned.
+ *
+ * Explicit test-key mode accepts only Cloudflare's public dummy secrets. Their success answer
+ * names example.com and omits action, so that mode cannot check form binding. Select it only
+ * for an explicit loopback development origin, never as an automatic fallback for live config.
  */
-export function createTurnstileVerifier({
-  secret,
-  hostnames,
-  action,
-  timeoutMs = 8_000,
-  fetcher = fetch,
-}: TurnstileVerifierOptions): VerifyTurnstile {
-  if (!hostnames.length || hostnames.some((hostname) => !hostname.trim()))
-    throw new TypeError(
-      "Turnstile needs your app's exact hostnames. Set hostnames before serving requests.",
-    );
-  if (!/^[A-Za-z0-9_-]{1,32}$/.test(action))
-    throw new TypeError(
-      "Turnstile needs an action of 1 to 32 letters, digits, underscores or hyphens.",
-    );
+export function createTurnstileVerifier(options: TurnstileVerifierOptions): VerifyTurnstile {
+  const { secret, timeoutMs = 8_000, fetcher = fetch } = options;
+  const key = secret?.trim();
+  if (options.mode === "test-key") {
+    if (!key || !TEST_SECRETS.has(key))
+      throw new TypeError(
+        "Turnstile test-key mode accepts only Cloudflare's published dummy secrets. Use live mode for a real widget.",
+      );
+  } else {
+    if (!options.hostnames.length || options.hostnames.some((hostname) => !hostname.trim()))
+      throw new TypeError(
+        "Turnstile needs your app's exact hostnames. Set hostnames before serving requests.",
+      );
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(options.action))
+      throw new TypeError(
+        "Turnstile needs an action of 1 to 32 letters, digits, underscores or hyphens.",
+      );
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     throw new TypeError("Turnstile needs a timeoutMs above zero. Set a bounded request deadline.");
-  const allowed = new Set(hostnames);
-  const key = secret?.trim();
+  const expected =
+    options.mode === "test-key"
+      ? null
+      : { hostnames: new Set(options.hostnames), action: options.action };
 
   return async ({ token, remoteIp }) => {
     if (!key) return { ok: false, reason: "not-configured" };
@@ -93,14 +121,13 @@ export function createTurnstileVerifier({
         return { ok: false, reason: serviceFailed ? "unavailable" : "refused" };
       }
       if (answer.success !== true) return { ok: false, reason: "unavailable" };
-      if (
-        !("hostname" in answer) ||
-        typeof answer.hostname !== "string" ||
-        !("action" in answer) ||
-        typeof answer.action !== "string"
-      )
+      if (!("hostname" in answer) || typeof answer.hostname !== "string")
         return { ok: false, reason: "unavailable" };
-      if (!allowed.has(answer.hostname) || answer.action !== action)
+      // Dummy secrets return example.com and no action. They cannot prove a live form's binding.
+      if (expected === null) return { ok: true };
+      if (!("action" in answer) || typeof answer.action !== "string")
+        return { ok: false, reason: "unavailable" };
+      if (!expected.hostnames.has(answer.hostname) || answer.action !== expected.action)
         return { ok: false, reason: "refused" };
       return { ok: true };
     } catch {

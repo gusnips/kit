@@ -50,6 +50,10 @@
       "types": "./dist/oauth.d.ts",
       "default": "./dist/oauth.js"
     },
+    "./turnstile": {
+      "types": "./dist/turnstile.d.ts",
+      "default": "./dist/turnstile.js"
+    },
     "./keys": {
       "types": "./dist/keys.d.ts",
       "default": "./dist/keys.js"

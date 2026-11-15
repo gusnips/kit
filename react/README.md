@@ -245,6 +245,52 @@ operator can still send one from Studio. Name a destination for each with
 There is also a deadline on every request, which none of the codebases this came from had. A
 request with no timeout is a spinner with no end.
 
+## A security check on a human form
+
+```ts
+const token = await check.take(); // One token for one request.
+```
+
+`useTurnstile` loads Cloudflare's script once per page and keeps each form's tokens separate:
+
+```tsx
+import { useTurnstile } from "@gusnips/react/turnstile";
+
+const check = useTurnstile({ siteKey: publicSiteKey, action: "contact", language: "en" });
+
+return <div ref={check.container} />;
+```
+
+Place that container near the submit button. It shows a challenge only when Cloudflare needs one.
+It uses a compact box below 300 px and follows the system theme unless you pass `theme`.
+`eager: false` waits for the first `take()` or `retry()` before loading anything.
+
+- `state` is `off` without a site key, `idle` before starting, then `loading`, `interactive` or
+  `ready`. Explain `loading` beside the button and `interactive` beside the box.
+- `failed` means the check failed or timed out. `unavailable` means its script could not load.
+  Explain what happened, suggest checking the connection or blocker and offer `check.retry()`.
+- Set the submit button pending as soon as pressed, before awaiting `take()`. Keep the form's input
+  on any failure. `take()` waits at most 60 seconds and rejects with a `TurnstileError`; its
+  `reason` is `failed`, `unavailable`, `busy` or `cancelled`. A second pending acquisition is
+  `busy`. A changed form or unmount is `cancelled`, not a result for the new form.
+- Each token is handed out once and expires after five minutes. The next check starts when a token
+  is taken or expires. Never retry a request with an old token; take another one.
+
+Send the token to your own endpoint, where `createTurnstileVerifier` from `@gusnips/server` checks
+it, **or** pass it as GoTrue's `options.captchaToken`. Do not verify it twice: verification consumes
+it. Password reset uses its own `captchaToken` option. Each email send and resend needs a fresh
+one; verifying an emailed sign-in code is a separate operation.
+
+An unset site key returns `undefined`, not a solved check. This lets a web build ship before
+GoTrue enforcement changes, but proves no server protection is active. Deploy every affected
+client first, including native clients, before enabling GoTrue's global CAPTCHA setting. Keep
+OAuth, API keys, MCP, webhooks and CLI flows out of this check.
+
+Restrict the widget to your product's hostnames. Allow `https://challenges.cloudflare.com` in the
+page's CSP `script-src`, `frame-src` and `connect-src`. Only the public site key belongs in the
+browser; the secret stays on the server. This subpath is browser-only and does not enter the main
+barrel used by React Native. Importing it during prerender reads no browser globals.
+
 ## Never retry what waiting cannot fix
 
 ```ts
@@ -998,19 +1044,20 @@ something.
 `@gusnips/react` itself needs `react` and nothing else. Anything that needs another runtime peer
 lives behind a subpath, so you install a dependency only if you import the thing that uses it:
 
-| Import from               | What is in it                            | What you must have    |
-| ------------------------- | ---------------------------------------- | --------------------- |
-| `@gusnips/react`          | the client and rest                      | react                 |
-| `@gusnips/react/store`    | `createAuthStore`, `authSlice`           | zustand               |
-| `@gusnips/react/guards`   | the route guards                         | react-router-dom      |
-| `@gusnips/react/hydrate`  | `hydrateOrMount`                         | react-dom             |
-| `@gusnips/react/supabase` | the session adapter, `parseAuthCallback` | @supabase/supabase-js |
-| `@gusnips/react/ui`       | the seven wrappers                       | @base-ui/react        |
-| `@gusnips/react/contract` | two prerender names                      | nothing               |
-| `@gusnips/react/theme`    | `createTheme`, `startTheme`              | react                 |
-| `@gusnips/react/commands` | slash matching and `useSlashCommands`    | react                 |
-| `@gusnips/react/oauth`    | the consent and device page hooks        | @tanstack/react-query |
-| `@gusnips/react/keys`     | `createKeyLifecycle`, `useKeyReveals`    | react                 |
+| Import from                | What is in it                            | What you must have    |
+| -------------------------- | ---------------------------------------- | --------------------- |
+| `@gusnips/react`           | the client and rest                      | react                 |
+| `@gusnips/react/store`     | `createAuthStore`, `authSlice`           | zustand               |
+| `@gusnips/react/guards`    | the route guards                         | react-router-dom      |
+| `@gusnips/react/hydrate`   | `hydrateOrMount`                         | react-dom             |
+| `@gusnips/react/supabase`  | the session adapter, `parseAuthCallback` | @supabase/supabase-js |
+| `@gusnips/react/ui`        | the seven wrappers                       | @base-ui/react        |
+| `@gusnips/react/contract`  | two prerender names                      | nothing               |
+| `@gusnips/react/theme`     | `createTheme`, `startTheme`              | react                 |
+| `@gusnips/react/commands`  | slash matching and `useSlashCommands`    | react                 |
+| `@gusnips/react/oauth`     | the consent and device page hooks        | @tanstack/react-query |
+| `@gusnips/react/turnstile` | `useTurnstile`, single-use form tokens   | react, a browser      |
+| `@gusnips/react/keys`      | `createKeyLifecycle`, `useKeyReveals`    | react                 |
 
 The rule behind that table: **a peer marked optional must not be reachable from the main entry
 point.** An optional peer the barrel imports anyway is not optional: it is a required one whose

@@ -293,6 +293,11 @@ page's CSP `script-src`, `frame-src` and `connect-src`. Only the public site key
 browser; the secret stays on the server. This subpath is browser-only and does not enter the main
 barrel used by React Native. Importing it during prerender reads no browser globals.
 
+A phone app uses `@gusnips/native/turnstile` instead. It follows the same rules for tokens because
+both run `createTurnstileMachine` from `@gusnips/react/turnstile-machine`, which holds the states,
+the single-use token and the expiry, and reads no browser global. Import that subpath only to drive
+the check from another kind of widget.
+
 ## Never retry what waiting cannot fix
 
 ```ts
@@ -1046,20 +1051,21 @@ something.
 `@gusnips/react` itself needs `react` and nothing else. Anything that needs another runtime peer
 lives behind a subpath, so you install a dependency only if you import the thing that uses it:
 
-| Import from                | What is in it                            | What you must have    |
-| -------------------------- | ---------------------------------------- | --------------------- |
-| `@gusnips/react`           | the client and rest                      | react                 |
-| `@gusnips/react/store`     | `createAuthStore`, `authSlice`           | zustand               |
-| `@gusnips/react/guards`    | the route guards                         | react-router-dom      |
-| `@gusnips/react/hydrate`   | `hydrateOrMount`                         | react-dom             |
-| `@gusnips/react/supabase`  | the session adapter, `parseAuthCallback` | @supabase/supabase-js |
-| `@gusnips/react/ui`        | the seven wrappers                       | @base-ui/react        |
-| `@gusnips/react/contract`  | two prerender names                      | nothing               |
-| `@gusnips/react/theme`     | `createTheme`, `startTheme`              | react                 |
-| `@gusnips/react/commands`  | slash matching and `useSlashCommands`    | react                 |
-| `@gusnips/react/oauth`     | the consent and device page hooks        | @tanstack/react-query |
-| `@gusnips/react/turnstile` | `useTurnstile`, single-use form tokens   | react, a browser      |
-| `@gusnips/react/keys`      | `createKeyLifecycle`, `useKeyReveals`    | react                 |
+| Import from                        | What is in it                            | What you must have    |
+| ---------------------------------- | ---------------------------------------- | --------------------- |
+| `@gusnips/react`                   | the client and rest                      | react                 |
+| `@gusnips/react/store`             | `createAuthStore`, `authSlice`           | zustand               |
+| `@gusnips/react/guards`            | the route guards                         | react-router-dom      |
+| `@gusnips/react/hydrate`           | `hydrateOrMount`                         | react-dom             |
+| `@gusnips/react/supabase`          | the session adapter, `parseAuthCallback` | @supabase/supabase-js |
+| `@gusnips/react/ui`                | the seven wrappers                       | @base-ui/react        |
+| `@gusnips/react/contract`          | two prerender names                      | nothing               |
+| `@gusnips/react/theme`             | `createTheme`, `startTheme`              | react                 |
+| `@gusnips/react/commands`          | slash matching and `useSlashCommands`    | react                 |
+| `@gusnips/react/oauth`             | the consent and device page hooks        | @tanstack/react-query |
+| `@gusnips/react/turnstile`         | `useTurnstile`, single-use form tokens   | react, a browser      |
+| `@gusnips/react/turnstile-machine` | the token rules, with no widget          | nothing               |
+| `@gusnips/react/keys`              | `createKeyLifecycle`, `useKeyReveals`    | react                 |
 
 The rule behind that table: **a peer marked optional must not be reachable from the main entry
 point.** An optional peer the barrel imports anyway is not optional: it is a required one whose

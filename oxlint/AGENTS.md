@@ -2,8 +2,8 @@ Rules for `@gusnips/oxlint`. The repo-wide rules are in the root `AGENTS.md`.
 
 # What the presets are, measured
 
-Two JSON files and one plugin file. The JSON files are the lint core every app repeated in its
-ESLint config (`js` and `typescript-eslint` `recommended`, `no-explicit-any`, `no-unused-vars` with
+Two JSON files, our plugin and a one-line hooks-library re-export. The JSON files are the lint core
+every app repeated in its ESLint config (`js` and `typescript-eslint` `recommended`, `no-explicit-any`, `no-unused-vars` with
 `^_`, `no-undef` off, `eslint-plugin-react-hooks` 7), written once for oxlint. Anything a repo wrote
 for itself (`no-restricted-imports`, `no-console`, type-aware rules) stays out. A rule goes in only
 when most repos had it. The plugin (`plugin.js`, exported as `@gusnips/oxlint/plugin`) is the one
@@ -49,8 +49,11 @@ Measured on oxlint 1.93.0, 2026-11-15:
   `react.json` and proves their implementations with findings. Config/gating controls apply compiler
   options only to fixture files, then report an invalid provider and gating directive. Those
   options never go in the shared preset.
-- Only `react.json` loads the library. `base.json` stays unchanged, so consumers preserving older
-  hooks rules through the base preset keep their existing policy.
+- Only `react.json` loads the library by default. `@gusnips/oxlint/react-hooks` is a one-line
+  re-export for base-scoped consumers: they can register the same `react-hooks-js` namespace and
+  enable its rules only in their existing frontend overrides. The check proves impure calls in
+  `client/` report while the same calls in `server/` stay quiet, at root and nested workspace.
+  `base.json` stays unchanged; loading the entry alone enables nothing.
 
 # The plugin: the two `no-restricted-syntax` selectors
 

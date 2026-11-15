@@ -274,7 +274,7 @@ function oxlint(cwd: string, args: string[]): string {
 
 /** The preset files as they are on disk, by file name. */
 const SHIPPED = Object.fromEntries(
-  ["base.json", "react.json", "plugin.js", "package.json"].map((name) => [
+  ["base.json", "react.json", "react-hooks.js", "plugin.js", "package.json"].map((name) => [
     name,
     readFileSync(join(PACKAGE, name), "utf8"),
   ]),
@@ -301,8 +301,10 @@ function repoWith(
   symlinkSync(REACT_HOOKS, join(installed, "node_modules", "eslint-plugin-react-hooks"), "dir");
   writeFileSync(join(dir, ".oxlintrc.json"), JSON.stringify(config));
   mkdirSync(join(dir, where), { recursive: true });
-  for (const [name, source] of Object.entries(fixture))
+  for (const [name, source] of Object.entries(fixture)) {
+    mkdirSync(dirname(join(dir, where, name)), { recursive: true });
     writeFileSync(join(dir, where, name), source);
+  }
   return dir;
 }
 
@@ -472,6 +474,42 @@ const [compilerFromBase] = diagnoseWorkspace(
   COMPILER_FIXTURE,
 );
 report("base.json on the compiler fixture", differences([], compilerFromBase));
+
+// Base-scoped adapters can load the same library without adopting the whole React preset.
+// A React-shaped component outside client/ must stay quiet even though its calls are impure.
+const scopedCompilerFixture = Object.fromEntries(
+  Object.entries(COMPILER_FIXTURE).map(([name, source]) => [`client/${name}`, source]),
+);
+scopedCompilerFixture["server/outside.tsx"] = `export function Outside() {
+  return <p>{Date.now() + Math.random()}</p>;
+}
+`;
+const scopedCompilerConfig = {
+  extends: ["./node_modules/@gusnips/oxlint/base.json"],
+  jsPlugins: [
+    { name: "react-hooks-js", specifier: "@gusnips/oxlint/react-hooks" },
+    "@gusnips/oxlint/plugin",
+  ],
+  overrides: [
+    {
+      files: ["**/client/**"],
+      rules: {
+        "react-hooks-js/purity": "error",
+        "react-hooks-js/config": "error",
+        "react-hooks-js/gating": "error",
+      },
+    },
+    ...compilerConfig.overrides,
+  ],
+};
+const [scopedFromRoot, scopedFromWorkspace] = diagnoseWorkspace(
+  scopedCompilerConfig,
+  SHIPPED,
+  scopedCompilerFixture,
+);
+const scopedWanted = COMPILER_DIAGNOSTICS.map((line) => `client/${line}`);
+report("scoped compiler, at the root", differences(scopedWanted, scopedFromRoot));
+report("scoped compiler, in a workspace", differences(scopedWanted, scopedFromWorkspace));
 
 if (problems.length > 0) {
   console.error(`✗ oxlint presets: ${String(problems.length)} problem(s)\n`);

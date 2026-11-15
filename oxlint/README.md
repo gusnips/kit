@@ -65,7 +65,7 @@ Not there:
 - `react/react-in-jsx-scope` is off. The JSX transform does not need `React` in scope.
 - A refresh rule. Most of our repos turn `only-export-components` off.
 
-Turn any of them on in your own file.
+You can change rule levels in your own config.
 
 ## Your own rules
 
@@ -78,6 +78,32 @@ Write them in your `.oxlintrc.json`, next to `extends`. Yours win.
   "overrides": [{ "files": ["**/*.test.ts"], "rules": { "typescript/no-explicit-any": "off" } }]
 }
 ```
+
+## Hooks rules in selected folders
+
+If your repo uses `base.json` and applies hooks rules to only some folders, keep that scope. Load
+`@gusnips/oxlint/react-hooks` and add the three rules to your existing frontend overrides. This entry
+only re-exports the hooks library; it turns on no rules by itself.
+
+```json
+{
+  "extends": ["./node_modules/@gusnips/oxlint/base.json"],
+  "jsPlugins": [{ "name": "react-hooks-js", "specifier": "@gusnips/oxlint/react-hooks" }],
+  "overrides": [
+    {
+      "files": ["apps/web/**/*.{ts,tsx}"],
+      "rules": {
+        "react-hooks-js/purity": "error",
+        "react-hooks-js/config": "error",
+        "react-hooks-js/gating": "error"
+      }
+    }
+  ]
+}
+```
+
+Keep your existing native hooks rules in that override too. You do not need to add the hooks
+library to the app or extend the full React preset globally.
 
 ## Two rules of our own
 

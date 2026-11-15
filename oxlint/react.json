@@ -1,7 +1,7 @@
 {
   "extends": ["./base.json"],
   "plugins": ["react"],
-  "jsPlugins": [{ "name": "react-hooks-js", "specifier": "eslint-plugin-react-hooks" }],
+  "jsPlugins": [{ "name": "react-hooks-js", "specifier": "./react-hooks.js" }],
   "rules": {
     "react/react-in-jsx-scope": "off",
     "react/jsx-key": "off",

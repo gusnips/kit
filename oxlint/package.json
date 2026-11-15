@@ -12,11 +12,13 @@
   "exports": {
     "./base.json": "./base.json",
     "./react.json": "./react.json",
+    "./react-hooks": "./react-hooks.js",
     "./plugin": "./plugin.js"
   },
   "files": [
     "base.json",
     "react.json",
+    "react-hooks.js",
     "plugin.js",
     "README.md",
     "LICENSE"

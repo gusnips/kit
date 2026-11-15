@@ -26,6 +26,32 @@ Read on oxlint 1.93.0, 2026-11-13:
   reads the React rule levels back with `--print-config`, and runs the same fixture through a preset
   with its rules deleted, which must NOT match.
 
+# Hooks rules from the original library
+
+Since 0.2.2, `react.json` uses exact `eslint-plugin-react-hooks` 7.1.1 for `purity`, `config` and
+`gating`, as errors under `react-hooks-js`. The native purity rule stays off: it reports `new Date()`
+where the original accepts it. Use the library, not a local copy of these checks.
+
+Measured on oxlint 1.93.0, 2026-11-15:
+
+- The library's 7.1.1 `recommended` and `recommended-latest` configs enable those three as errors.
+  `component-hook-factories` was removed in 7.1.0. In 7.1.1 it is a deprecated rule whose `create`
+  returns `{}`, and neither recommended config enables it. Do not enable or claim that check.
+- `jsPlugins` in an extended config resolves relative to that extended file. A dependency only in
+  `@gusnips/oxlint/node_modules` works at the consumer root and from `apps/web` with
+  `-c ../../.oxlintrc.json`. The consumer needs no direct hooks-library dependency or JS plugin
+  entry. Its own `@gusnips/oxlint/plugin` entry can coexist with the inherited library.
+- The library declares ESLint as a required peer. Bun's default install resolves that peer, but
+  the library runs inside oxlint without importing it. A fresh `bun install --omit=peer` with no
+  resolvable `eslint` still reports `Date.now()` and `Math.random()` and accepts `new Date()`.
+  No ESLint CLI or typescript-eslint runs here. Do not claim that the dependency tree has no ESLint.
+- `--print-config` omits JS plugins and their rules. The check reads their three levels from
+  `react.json` and proves their implementations with findings. Config/gating controls apply compiler
+  options only to fixture files, then report an invalid provider and gating directive. Those
+  options never go in the shared preset.
+- Only `react.json` loads the library. `base.json` stays unchanged, so consumers preserving older
+  hooks rules through the base preset keep their existing policy.
+
 # The plugin: the two `no-restricted-syntax` selectors
 
 oxlint 1.93.0 has no `no-restricted-syntax`. 8 repos wrote the same two selectors with it (read from
@@ -53,7 +79,7 @@ Read on oxlint 1.93.0, 2026-11-14:
 - An ESLint-style `create(context)` with `context.report({ node, messageId })` works as is.
 - Same lines and columns as ESLint's `no-restricted-syntax` over the same fixture: 7 findings, ESLint
   9.39.5 with typescript-eslint 8.72.2 on TypeScript 5.9.3 against oxlint 1.93.0. The fixture is in
-  `scripts/check-preset.ts`. Kit has no ESLint any more, so that run was done once in a scratch
+  `scripts/check-preset.ts`. Kit does not run ESLint, so that comparison ran once in a scratch
   install. Repeat it when a rule changes: copy the fixture files out, run ESLint with the two selectors
   as `no-restricted-syntax` options, and compare `file:line:column`.
 - A fixture line that starts with `as` is a parse error: TypeScript does not read `as` as an operator
@@ -71,13 +97,14 @@ Measured 2026-11-13 by running `react.json` over the 22 checkouts that had an `a
 
 - `react/purity` flags `new Date()`. `react-hooks/purity` flags `Date.now()` and `Math.random()` and
   not `new Date()`, which is how a footer gets its year. 82 of 101 purity reports, in 15 repos, were
-  `new Date()`. Off until oxc matches the plugin.
+  `new Date()`. The native rule stays off; the original check now runs as `react-hooks-js/purity`.
 - `react/jsx-key` flags an array of elements passed as a prop. The `Trans` `components` prop takes
   exactly that. 256 reports in 7 repos. Off.
 - Left on although ESLint never had them: `react/no-children-prop` (3 reports in 3 repos, all in tests
   that pass `children` to `createElement`) and the other `correctness` rules of the `react` plugin.
   They fire rarely and are right when they do.
-- `config` and `gating` from the plugin do not exist in oxlint, and neither does `no-octal`.
+- `config` and `gating` have no native oxlint equivalents; the hooks JS plugin now supplies them.
+  `no-octal` has no oxlint rule.
 - Correction, measured 2026-11-15: oxlint 1.93.0 does have `react/unsupported-syntax`. Versions
   0.1.0 through 0.2.0 left it out and wrongly listed it as unavailable. Version 0.2.1 restores it as
   a warning, matching both `recommended` and `recommended-latest` in eslint-plugin-react-hooks

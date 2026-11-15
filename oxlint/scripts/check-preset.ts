@@ -16,9 +16,11 @@
  *   four of them: `no-var`, `prefer-const`, `prefer-rest-params`, `prefer-spread`); must NOT flag an unused `_`-prefixed argument or variable;
  *   and must say nothing about React. `react.json` adds the conditional hook, the stale effect
  *   dependency and an `eval` call in a component.
- * - the severity of every React rule `eslint-plugin-react-hooks@7`'s `recommended` sets, read back
- *   from `--print-config`. A fixture cannot trip all of them cheaply, and a rule that oxlint
- *   renames shows up here as `undefined` instead of as a pass.
+ * - native React rule levels, read back from `--print-config`. It omits JS rules, so their
+ *   levels are read from the preset and their implementations are checked through findings.
+ * - the hooks library's purity, config and gating rules, loaded from the extended preset's
+ *   dependencies at the root and in a nested workspace. A consumer's own plugin must coexist.
+ *   `new Date()` stays allowed; `Date.now()` and `Math.random()` must report errors.
  * - the positive control: the same fixture through a copy of each preset with its rules deleted
  *   must NOT match. A check that passes on an empty preset is not looking at the preset.
  * - the plugin (`plugin.js`): its two rules flag exactly what the ESLint selectors they replace
@@ -29,20 +31,17 @@
  * Run: bun run scripts/check-preset.ts
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 const PACKAGE = join(import.meta.dirname, "..");
+const require = createRequire(import.meta.url);
 // `bin/oxlint` is a node script, and the package's exports map does not list it, so find the
 // package by its entry and walk back to the bin.
-const OXLINT = join(
-  dirname(createRequire(import.meta.url).resolve("oxlint")),
-  "..",
-  "bin",
-  "oxlint",
-);
+const OXLINT = join(dirname(require.resolve("oxlint")), "..", "bin", "oxlint");
+const REACT_HOOKS = dirname(require.resolve("eslint-plugin-react-hooks/package.json"));
 
 const FIXTURE: Record<string, string> = {
   // An unused `_` argument and `_` variable must pass; the unused `unused` and the `any` must not.
@@ -156,8 +155,8 @@ const REACT_DIAGNOSTICS = [
   "hooks.tsx:14 warning react-hooks(exhaustive-deps)",
 ];
 
-/** What `eslint-plugin-react-hooks@7`'s `recommended` sets, by the name oxlint gives each rule. */
-const REACT_HOOKS_RECOMMENDED: Record<string, string> = {
+/** Native equivalents of hooks 7.1.1's recommended rules, with its non-equivalent purity off. */
+const NATIVE_REACT_LEVELS: Record<string, string> = {
   "react/rules-of-hooks": "deny",
   "react/exhaustive-deps": "warn",
   "react/static-components": "deny",
@@ -171,7 +170,39 @@ const REACT_HOOKS_RECOMMENDED: Record<string, string> = {
   "react/set-state-in-effect": "deny",
   "react/error-boundaries": "deny",
   "react/set-state-in-render": "deny",
+  "react/purity": "allow",
 };
+
+const COMPILER_FIXTURE: Record<string, string> = {
+  "purity.tsx": `export function Year() {
+  const year = new Date().getFullYear();
+  return <p>{year}</p>;
+}
+export function Clock() {
+  return <p>{Date.now()}</p>;
+}
+export function Random() {
+  return <p>{Math.random()}</p>;
+}
+`,
+  "config.tsx": `import { read } from "data";
+export function External() {
+  return <p>{read()}</p>;
+}
+`,
+  "gating.tsx": `export function Gated() {
+  "use memo if(bad-flag)";
+  return <p>Hello</p>;
+}
+`,
+};
+
+const COMPILER_DIAGNOSTICS = [
+  "config.tsx:3 error react-hooks-js(config)",
+  "gating.tsx:2 error react-hooks-js(gating)",
+  "purity.tsx:6 error react-hooks-js(purity)",
+  "purity.tsx:9 error react-hooks-js(purity)",
+];
 
 /** Where the plugin's fixture lives: a workspace folder, like the apps that use the plugin. */
 const WORKSPACE = "apps/web";
@@ -264,6 +295,10 @@ function repoWith(
   mkdirSync(installed, { recursive: true });
   for (const [name, source] of Object.entries(presets))
     writeFileSync(join(installed, name), source);
+  // Like an isolated install: the hooks library is only reachable from the preset package, not
+  // from the consumer root. The inherited jsPlugins entry must resolve from react.json's folder.
+  mkdirSync(join(installed, "node_modules"), { recursive: true });
+  symlinkSync(REACT_HOOKS, join(installed, "node_modules", "eslint-plugin-react-hooks"), "dir");
   writeFileSync(join(dir, ".oxlintrc.json"), JSON.stringify(config));
   mkdirSync(join(dir, where), { recursive: true });
   for (const [name, source] of Object.entries(fixture))
@@ -295,17 +330,18 @@ function diagnose(entry: string, presets: Record<string, string> = SHIPPED): str
 }
 
 /**
- * The plugin fixture, linted from the repo root and again from inside the workspace the way a
+ * A fixture, linted from the repo root and again from inside the workspace the way a
  * workspace's own `lint` script runs (`oxlint -c ../../.oxlintrc.json src`). Both must give the
- * same findings, so the second list is returned with the workspace prefix put back.
+ * same findings, with file paths relative to src.
  */
-function diagnosePlugin(
+function diagnoseWorkspace(
   config: object,
   presets: Record<string, string> = SHIPPED,
+  fixture: Record<string, string> = PLUGIN_FIXTURE,
 ): [fromRoot: string[], fromWorkspace: string[]] {
-  const dir = repoWith(config, presets, PLUGIN_FIXTURE, join(WORKSPACE, "src"));
+  const dir = repoWith(config, presets, fixture, join(WORKSPACE, "src"));
   try {
-    const files = Object.keys(PLUGIN_FIXTURE).map((name) => join(WORKSPACE, "src", name));
+    const files = Object.keys(fixture).map((name) => join(WORKSPACE, "src", name));
     const fromRoot = findings(dir, ".oxlintrc.json", files).map((line) =>
       line.replace(`${WORKSPACE}/src/`, ""),
     );
@@ -324,9 +360,7 @@ function severities(entry: string): Record<string, string | undefined> {
     const config: { rules: Record<string, string> } = JSON.parse(
       oxlint(dir, ["-c", ".oxlintrc.json", "--print-config"]),
     );
-    return Object.fromEntries(
-      Object.keys(REACT_HOOKS_RECOMMENDED).map((r) => [r, config.rules[r]]),
-    );
+    return Object.fromEntries(Object.keys(NATIVE_REACT_LEVELS).map((r) => [r, config.rules[r]]));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -351,7 +385,7 @@ report(
   differences([...BASE_DIAGNOSTICS, ...REACT_DIAGNOSTICS].sort(), diagnose("react.json")),
 );
 
-const wanted = Object.entries(REACT_HOOKS_RECOMMENDED);
+const wanted = Object.entries(NATIVE_REACT_LEVELS);
 const have = severities("react.json");
 for (const [rule, severity] of wanted)
   if (have[rule] !== severity)
@@ -377,12 +411,12 @@ const asked = {
   overrides: [{ files: ["**/*.test.ts"], rules: { "gusnips/no-as-unknown-as": "off" } }],
 };
 const pluginWanted = [...PLUGIN_DIAGNOSTICS].sort();
-const [pluginFromRoot, pluginFromWorkspace] = diagnosePlugin(asked);
+const [pluginFromRoot, pluginFromWorkspace] = diagnoseWorkspace(asked);
 report("plugin, at the root", differences(pluginWanted, pluginFromRoot));
 report("plugin, in a workspace", differences(pluginWanted, pluginFromWorkspace));
 // Opt-in: the presets alone say nothing about either rule.
 for (const entry of ["base.json", "react.json"]) {
-  const [quiet] = diagnosePlugin({ extends: [`./node_modules/@gusnips/oxlint/${entry}`] });
+  const [quiet] = diagnoseWorkspace({ extends: [`./node_modules/@gusnips/oxlint/${entry}`] });
   report(`${entry} on the plugin fixture`, differences([], quiet));
 }
 // The positive control: a plugin with its rules deleted must not pass, whether oxlint rejects the
@@ -393,11 +427,51 @@ const hollow = {
 };
 let hollowPasses = false;
 try {
-  hollowPasses = differences(pluginWanted, diagnosePlugin(asked, hollow)[0]).length === 0;
+  hollowPasses = differences(pluginWanted, diagnoseWorkspace(asked, hollow)[0]).length === 0;
 } catch {
   // oxlint refused the config: the control holds.
 }
 if (hollowPasses) problems.push("control: a plugin with no rules produced the expected findings.");
+
+// --print-config omits JS rules in oxlint 1.93, so pin the shared levels from the preset and
+// prove the implementation with findings. Config/gating need options to reach their error paths;
+// those options belong only to these fixture files, not to the shared preset.
+const reactPreset: { rules: Record<string, string> } = JSON.parse(SHIPPED["react.json"] ?? "");
+for (const rule of ["purity", "config", "gating"]) {
+  const name = `react-hooks-js/${rule}`;
+  if (reactPreset.rules[name] !== "error")
+    problems.push(`react.json: ${name} is ${String(reactPreset.rules[name])}, expected error`);
+}
+const compilerConfig = {
+  extends: ["./node_modules/@gusnips/oxlint/react.json"],
+  // A consumer can add its own plugin without losing the inherited hooks library.
+  jsPlugins: ["@gusnips/oxlint/plugin"],
+  overrides: [
+    {
+      files: ["**/config.tsx"],
+      rules: {
+        "react-hooks-js/config": ["error", { environment: { moduleTypeProvider: true } }],
+      },
+    },
+    {
+      files: ["**/gating.tsx"],
+      rules: { "react-hooks-js/gating": ["error", { dynamicGating: { source: "feature-flags" } }] },
+    },
+  ],
+};
+const [compilerFromRoot, compilerFromWorkspace] = diagnoseWorkspace(
+  compilerConfig,
+  SHIPPED,
+  COMPILER_FIXTURE,
+);
+report("compiler, at the root", differences(COMPILER_DIAGNOSTICS, compilerFromRoot));
+report("compiler, in a workspace", differences(COMPILER_DIAGNOSTICS, compilerFromWorkspace));
+const [compilerFromBase] = diagnoseWorkspace(
+  { extends: ["./node_modules/@gusnips/oxlint/base.json"] },
+  SHIPPED,
+  COMPILER_FIXTURE,
+);
+report("base.json on the compiler fixture", differences([], compilerFromBase));
 
 if (problems.length > 0) {
   console.error(`✗ oxlint presets: ${String(problems.length)} problem(s)\n`);
@@ -405,5 +479,5 @@ if (problems.length > 0) {
   process.exit(1);
 }
 console.log(
-  `✓ oxlint presets: ${String(BASE_DIAGNOSTICS.length)} base and ${String(REACT_DIAGNOSTICS.length)} react diagnostics, ${String(wanted.length)} rule severities, 3 controls, ${String(PLUGIN_DIAGNOSTICS.length)} plugin findings at the root and in a workspace.`,
+  `✓ oxlint presets: ${String(BASE_DIAGNOSTICS.length)} base and ${String(REACT_DIAGNOSTICS.length)} react diagnostics, ${String(wanted.length)} native and 3 JS rule severities, 3 controls, ${String(PLUGIN_DIAGNOSTICS.length)} opt-in and ${String(COMPILER_DIAGNOSTICS.length)} compiler findings at the root and in a workspace.`,
 );

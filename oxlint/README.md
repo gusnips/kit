@@ -36,19 +36,30 @@ that:
   `prefer-rest-params` and `prefer-spread`.
 
 `react.json` extends `base.json`, turns on the `react` plugin, and sets what
-`eslint-plugin-react-hooks` 7 sets in `recommended`, at the same level:
+`eslint-plugin-react-hooks` 7.1.1 sets in `recommended`, at the same level:
 
 - `rules-of-hooks` (error) and `exhaustive-deps` (warning).
 - The React Compiler rules: `static-components`, `use-memo`, `preserve-manual-memoization`,
   `immutability`, `globals`, `refs`, `set-state-in-effect`, `error-boundaries` and
   `set-state-in-render` (errors), and `incompatible-library` and `unsupported-syntax` (warnings).
+- `purity`, `config` and `gating` (errors) run through the original hooks library, pinned to
+  7.1.1, as `react-hooks-js/*`. Oxlint's native versions are missing or behave differently.
+
+The React preset loads this JS plugin for you, including when your config extends it from a nested
+workspace. The library is a dependency of this package, not something each app needs to add.
+Oxlint calls JS plugin support alpha.
+
+Installing may also pull in ESLint because the hooks library lists it as a peer dependency. The
+rules run in oxlint, not the ESLint CLI, and do not use typescript-eslint. They also work when that
+unused peer is omitted.
 
 Not there:
 
-- `config` and `gating`. oxlint does not have them yet.
+- `component-hook-factories`. The library removed this check in 7.1.0. Its old name in 7.1.1 does
+  nothing and is not in `recommended`, so this preset does not enable it.
 - `no-octal`. oxlint has no such rule, and TypeScript rejects octal literals.
-- `react/purity` is off. It reports `new Date()` in a component, and the ESLint plugin does not. The
-  plugin still reports `Date.now()` and `Math.random()`.
+- Native `react/purity` stays off. It reports `new Date()` in a component, and the original plugin
+  does not. `react-hooks-js/purity` allows `new Date()` and rejects `Date.now()` and `Math.random()`.
 - `react/jsx-key` is off. It reports the `components={[<b />, <i />]}` array that react-i18next's
   `Trans` takes.
 - `react/react-in-jsx-scope` is off. The JSX transform does not need `React` in scope.

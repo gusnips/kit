@@ -203,7 +203,7 @@
     },
     "server": {
       "name": "@gusnips/server",
-      "version": "0.18.0",
+      "version": "0.19.0",
       "devDependencies": {
         "@gusnips/http": ">=0.2.0 <1",
         "@hono/node-server": "^2.1.5",

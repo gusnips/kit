@@ -13,15 +13,18 @@ export type TurnstileState =
   | "ready"
   | "interactive"
   | "failed"
-  | "unavailable";
+  | "unavailable"
+  | "unsupported";
 
 export class TurnstileError extends Error {
-  constructor(readonly reason: "failed" | "unavailable" | "busy" | "cancelled") {
+  constructor(readonly reason: "failed" | "unavailable" | "unsupported" | "busy" | "cancelled") {
     super(
       {
         failed: "The security check did not finish. Try again.",
         unavailable:
           "The security check could not load. Check your connection or blocker, then retry.",
+        unsupported:
+          "This browser cannot run the security check. Update it or use another browser.",
         busy: "A security check is already pending. Wait for that request to finish.",
         cancelled: "The form changed or closed. Start the request again on the current form.",
       }[reason],
@@ -93,8 +96,12 @@ function loadTurnstile(): Promise<TurnstileApi> {
     };
     const fail = () => {
       detach();
-      script.remove();
       reject(new TurnstileError("unavailable"));
+      try {
+        script.remove();
+      } catch {
+        // A cleanup failure must not strand the load or prevent its next attempt.
+      }
     };
     const timer = setTimeout(fail, LOAD_TIMEOUT_MS);
     try {
@@ -142,12 +149,12 @@ function createWidget({
     state = next;
     for (const listener of listeners) listener();
   };
-  const fail = (reason: "failed" | "unavailable" | "cancelled") => {
-    stopRound();
+  const fail = (reason: "failed" | "unavailable" | "unsupported" | "cancelled") => {
     token = null;
     const waiting = pending;
     pending = null;
     waiting?.reject(new TurnstileError(reason));
+    stopRound();
     if (reason !== "cancelled") setState(reason);
   };
 
@@ -161,7 +168,13 @@ function createWidget({
     stopRound = () => {
       if (!live) return;
       live = false;
-      if (widget) widget.api.remove(widget.id);
+      if (widget) {
+        try {
+          widget.api.remove(widget.id);
+        } catch {
+          // The SDK must not break React cleanup or the token promise's settlement.
+        }
+      }
     };
     void loadTurnstile().then(
       (api) => {
@@ -187,8 +200,8 @@ function createWidget({
               if (waiting) {
                 // The token goes to one waiter, never into state where a second take can see it.
                 pending = null;
-                start();
                 waiting.resolve(value);
+                start();
               } else {
                 token = { value, expiresAt: Date.now() + TOKEN_LIFETIME_MS };
                 setState("ready");
@@ -202,7 +215,9 @@ function createWidget({
               return true;
             },
             "timeout-callback": refuse,
-            "unsupported-callback": refuse,
+            "unsupported-callback": () => {
+              if (live) fail("unsupported");
+            },
             "before-interactive-callback": () => {
               if (live) setState("interactive");
             },
@@ -237,6 +252,7 @@ function createWidget({
   function take(): Promise<string | undefined> {
     if (!siteKey) return Promise.resolve(undefined);
     if (!element) return Promise.reject(new TurnstileError("cancelled"));
+    if (state === "unsupported") return Promise.reject(new TurnstileError("unsupported"));
     if (pending) return Promise.reject(new TurnstileError("busy"));
     const available = token;
     // Consume before yielding, not after a React state update or an awaited promise.
@@ -265,7 +281,9 @@ function createWidget({
   return {
     container,
     take,
-    retry: start,
+    retry: () => {
+      if (state !== "unsupported") start();
+    },
     getSnapshot: () => state,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
@@ -281,6 +299,7 @@ function createWidget({
  * Changing options or unmounting cancels waiting calls and discards old tokens.
  *
  * Show loading/interactive states and explain failed/unavailable states with a retry button.
+ * For unsupported browsers, ask the person to update or change browsers instead of retrying.
  * Keep the form's input on every failure. Tokens expire after five minutes. Send each token to
  * your API verifier OR to GoTrue's captchaToken, never both: verification consumes it.
  */

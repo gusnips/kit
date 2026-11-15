@@ -269,9 +269,11 @@ It uses a compact box below 300 px and follows the system theme unless you pass 
   `ready`. Explain `loading` beside the button and `interactive` beside the box.
 - `failed` means the check failed or timed out. `unavailable` means its script could not load.
   Explain what happened, suggest checking the connection or blocker and offer `check.retry()`.
+- `unsupported` means this browser cannot run the check. Ask the person to update it or use another
+  browser. `take()` rejects with that reason and `retry()` does not restart the same browser.
 - Set the submit button pending as soon as pressed, before awaiting `take()`. Keep the form's input
   on any failure. `take()` waits at most 60 seconds and rejects with a `TurnstileError`; its
-  `reason` is `failed`, `unavailable`, `busy` or `cancelled`. A second pending acquisition is
+  `reason` is `failed`, `unavailable`, `unsupported`, `busy` or `cancelled`. A second pending acquisition is
   `busy`. A changed form or unmount is `cancelled`, not a result for the new form.
 - Each token is handed out once and expires after five minutes. The next check starts when a token
   is taken or expires. Never retry a request with an old token; take another one.

@@ -581,8 +581,11 @@ prove hostname/action binding. Test those comparisons with real keys. Select thi
 an explicit loopback development origin; never infer it from a missing key or an HTTP URL alone.
 Default/live mode always checks hostname and action, even when a dummy secret was supplied.
 
-The request and body read have an 8-second deadline (`timeoutMs` changes it). There is one request,
-no automatic retry. A token lasts five minutes and verifies once: every retry needs a fresh one.
+The request and body read have an 8-second deadline (`timeoutMs` changes it). The caller settles
+at that deadline even if a custom fetcher or response body ignores abort. Unread HTTP-error bodies
+are cancelled. There is one request, no automatic retry. `fetcher` accepts a plain callable with a
+URL string and optional `RequestInit`, with no runtime-specific properties. A token lasts five
+minutes and verifies once: every retry needs a fresh one.
 The helper logs nothing and returns no secret, token, provider body or raw error. Keep those out
 of request logs too.
 

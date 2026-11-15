@@ -15,8 +15,8 @@ interface TurnstileVerifierCommon {
   secret: string | undefined;
   /** Bounds the request and response body. Defaults to 8 seconds. */
   timeoutMs?: number;
-  /** A fetch implementation for a local check. Never a browser-side verifier. */
-  fetcher?: typeof fetch;
+  /** A callable only, so a Bun wrapper does not need fetch.preconnect. */
+  fetcher?: (input: string, init?: RequestInit) => Promise<Response>;
 }
 
 export type TurnstileVerifierOptions = TurnstileVerifierCommon &
@@ -70,13 +70,13 @@ export function createTurnstileVerifier(options: TurnstileVerifierOptions): Veri
       throw new TypeError(
         "Turnstile needs your app's exact hostnames. Set hostnames before serving requests.",
       );
-    if (!/^[A-Za-z0-9_-]{1,32}$/.test(options.action))
+    if (typeof options.action !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(options.action))
       throw new TypeError(
         "Turnstile needs an action of 1 to 32 letters, digits, underscores or hyphens.",
       );
   }
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    throw new TypeError("Turnstile needs a timeoutMs above zero. Set a bounded request deadline.");
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)
+    throw new TypeError("Set Turnstile timeoutMs to a whole number from 1 to 2147483647.");
   const expected =
     options.mode === "test-key"
       ? null
@@ -84,54 +84,80 @@ export function createTurnstileVerifier(options: TurnstileVerifierOptions): Veri
 
   return async ({ token, remoteIp }) => {
     if (!key) return { ok: false, reason: "not-configured" };
-    if (!token?.trim() || token.length > 2_048) return { ok: false, reason: "refused" };
+    if (typeof token !== "string" || token.length > 2_048 || !token.trim())
+      return { ok: false, reason: "refused" };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetcher(SITEVERIFY_URL, {
-        method: "POST",
-        redirect: "error",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          secret: key,
-          response: token,
-          ...(remoteIp ? { remoteip: remoteIp } : {}),
-        }),
-        signal: controller.signal,
-      });
-      if (!response.ok) return { ok: false, reason: "unavailable" };
-      const answer: unknown = await response.json();
-      if (typeof answer !== "object" || answer === null || !("success" in answer))
-        return { ok: false, reason: "unavailable" };
-      if (answer.success === false) {
-        const codes: unknown = "error-codes" in answer ? answer["error-codes"] : [];
-        if (
-          !Array.isArray(codes) ||
-          !codes.every((code): code is string => typeof code === "string")
-        )
+    let response: Response | undefined;
+    const cancelResponse = () => {
+      // Do not await cancellation: a custom response can ignore abort or hang during cleanup.
+      void response?.body?.cancel().catch(() => {});
+    };
+    async function requestAndVerify(): Promise<TurnstileVerdict> {
+      try {
+        response = await fetcher(SITEVERIFY_URL, {
+          method: "POST",
+          redirect: "error",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            secret: key,
+            response: token,
+            ...(remoteIp ? { remoteip: remoteIp } : {}),
+          }),
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || !response.ok) {
+          controller.abort();
+          cancelResponse();
           return { ok: false, reason: "unavailable" };
-        const serviceFailed = codes.some((code) =>
-          [
-            "internal-error",
-            "invalid-input-secret",
-            "missing-input-secret",
-            "bad-request",
-          ].includes(code),
-        );
-        return { ok: false, reason: serviceFailed ? "unavailable" : "refused" };
+        }
+        const answer: unknown = await response.json();
+        if (controller.signal.aborted) return { ok: false, reason: "unavailable" };
+        if (typeof answer !== "object" || answer === null || !("success" in answer))
+          return { ok: false, reason: "unavailable" };
+        if (answer.success === false) {
+          const codes: unknown = "error-codes" in answer ? answer["error-codes"] : [];
+          if (
+            !Array.isArray(codes) ||
+            !codes.every((code): code is string => typeof code === "string")
+          )
+            return { ok: false, reason: "unavailable" };
+          const serviceFailed = codes.some((code) =>
+            [
+              "internal-error",
+              "invalid-input-secret",
+              "missing-input-secret",
+              "bad-request",
+            ].includes(code),
+          );
+          return { ok: false, reason: serviceFailed ? "unavailable" : "refused" };
+        }
+        if (answer.success !== true) return { ok: false, reason: "unavailable" };
+        if (!("hostname" in answer) || typeof answer.hostname !== "string")
+          return { ok: false, reason: "unavailable" };
+        // Dummy secrets return example.com and no action. They cannot prove a live form's binding.
+        if (expected === null) return { ok: true };
+        if (!("action" in answer) || typeof answer.action !== "string")
+          return { ok: false, reason: "unavailable" };
+        if (!expected.hostnames.has(answer.hostname) || answer.action !== expected.action)
+          return { ok: false, reason: "refused" };
+        return { ok: true };
+      } catch {
+        controller.abort();
+        cancelResponse();
+        return { ok: false, reason: "unavailable" };
       }
-      if (answer.success !== true) return { ok: false, reason: "unavailable" };
-      if (!("hostname" in answer) || typeof answer.hostname !== "string")
-        return { ok: false, reason: "unavailable" };
-      // Dummy secrets return example.com and no action. They cannot prove a live form's binding.
-      if (expected === null) return { ok: true };
-      if (!("action" in answer) || typeof answer.action !== "string")
-        return { ok: false, reason: "unavailable" };
-      if (!expected.hostnames.has(answer.hostname) || answer.action !== expected.action)
-        return { ok: false, reason: "refused" };
-      return { ok: true };
-    } catch {
-      return { ok: false, reason: "unavailable" };
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const deadline = new Promise<TurnstileVerdict>((resolve) => {
+        timer = setTimeout(() => {
+          // Settle first: even an adapter that ignores cancellation cannot extend this deadline.
+          resolve({ ok: false, reason: "unavailable" });
+          controller.abort();
+          cancelResponse();
+        }, timeoutMs);
+      });
+      return await Promise.race([requestAndVerify(), deadline]);
     } finally {
       clearTimeout(timer);
     }

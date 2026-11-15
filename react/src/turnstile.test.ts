@@ -17,6 +17,7 @@ afterEach(() => {
   for (const root of roots) act(() => root.unmount());
   roots.clear();
   document.body.replaceChildren();
+  if (vi.isFakeTimers()) expect(vi.getTimerCount()).toBe(0);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -101,6 +102,7 @@ describe("useTurnstile", () => {
   });
 
   it("can wait for a press before loading the check", async () => {
+    vi.useFakeTimers();
     const scripts = interceptScripts();
     const form = await mount({ eager: false });
     expect(form.check.state).toBe("idle");
@@ -109,6 +111,7 @@ describe("useTurnstile", () => {
     expect(scripts).toHaveLength(1);
     form.unmount();
     await cancelled;
+    await act(async () => scripts[0]!.dispatchEvent(new Event("error")));
   });
 
   it("takes a ready token synchronously once, even with two calls in one tick", async () => {
@@ -134,6 +137,54 @@ describe("useTurnstile", () => {
     await expect(form.take()).rejects.toMatchObject({ reason: "busy" });
     act(() => widgets[0]!.callback("only-once"));
     await expect(first).resolves.toBe("only-once");
+  });
+
+  it("settles ready and pending tokens even when SDK teardown throws", async () => {
+    for (const ready of [false, true]) {
+      const { widgets, api } = provider();
+      const form = await mount();
+      vi.mocked(api.remove).mockImplementation(() => {
+        throw new Error("SDK cleanup failed");
+      });
+      if (ready) act(() => widgets[0]!.callback("once"));
+      const result = form.take();
+      if (!ready) act(() => widgets[0]!.callback("once"));
+      await expect(result).resolves.toBe("once");
+      expect(api.remove).toHaveBeenCalledWith("1");
+      await flush();
+      expect(() => form.unmount()).not.toThrow();
+    }
+  });
+
+  it("rejects failures and unmounts independently of SDK teardown", async () => {
+    vi.useFakeTimers();
+    const { widgets, api } = provider();
+    const form = await mount();
+    vi.mocked(api.remove).mockImplementation(() => {
+      throw new Error("SDK cleanup failed");
+    });
+    const failed = expect(form.take()).rejects.toMatchObject({ reason: "failed" });
+    act(() => expect(widgets[0]!["error-callback"]()).toBe(true));
+    await failed;
+    act(() => form.check.retry());
+    await flush();
+    const cancelled = expect(form.take()).rejects.toMatchObject({ reason: "cancelled" });
+    expect(() => form.unmount()).not.toThrow();
+    await cancelled;
+    expect(api.remove).toHaveBeenCalledWith("2");
+  });
+
+  it("preserves an unsupported browser outcome instead of retrying the same browser", async () => {
+    const { widgets } = provider();
+    const form = await mount();
+    const unsupported = expect(form.take()).rejects.toMatchObject({ reason: "unsupported" });
+    act(() => widgets[0]!["unsupported-callback"]());
+    await unsupported;
+    expect(form.check.state).toBe("unsupported");
+    await expect(form.take()).rejects.toMatchObject({ reason: "unsupported" });
+    act(() => form.check.retry());
+    await flush();
+    expect(widgets).toHaveLength(1);
   });
 
   it("handles a token returned inside render and removes the ended widget", async () => {
@@ -262,9 +313,13 @@ describe("Turnstile script loading", () => {
   });
 
   it("rejects an empty script and removes no script owned by another caller", async () => {
+    vi.useFakeTimers();
     const scripts = interceptScripts();
     const foreign = document.createElement("script");
+    foreign.type = "application/json";
     foreign.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+    document.head.appendChild(foreign);
+    expect(foreign.isConnected).toBe(true);
     const remove = vi.spyOn(foreign, "remove");
     const form = await mount();
     await act(async () => scripts[0]!.dispatchEvent(new Event("load")));
@@ -276,5 +331,9 @@ describe("Turnstile script loading", () => {
     act(() => form.check.retry());
     expect(scripts).toHaveLength(3);
     form.unmount();
+    await act(async () => scripts[2]!.dispatchEvent(new Event("error")));
+    expect(foreign.isConnected).toBe(true);
+    foreign.remove();
+    expect(remove).toHaveBeenCalledOnce();
   });
 });

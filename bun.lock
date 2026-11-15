@@ -68,7 +68,7 @@
     },
     "native": {
       "name": "@gusnips/native",
-      "version": "0.1.5",
+      "version": "0.2.0",
       "bin": {
         "gusnips-native-css": "./dist/node/bin/gusnips-native-css.js",
         "gusnips-native-hermes-check": "./dist/node/bin/gusnips-native-hermes-check.js",
@@ -137,7 +137,7 @@
     },
     "react": {
       "name": "@gusnips/react",
-      "version": "0.11.0",
+      "version": "0.11.1",
       "dependencies": {
         "@gusnips/http": "workspace:*",
         "clsx": "^2.1.1",
@@ -263,7 +263,7 @@
     },
     "vite": {
       "name": "@gusnips/vite",
-      "version": "0.10.0",
+      "version": "0.10.1",
       "dependencies": {
         "@gusnips/react": "workspace:*",
       },

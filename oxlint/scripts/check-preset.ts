@@ -8,14 +8,14 @@
  * INSTALLED oxlint over a small fixture through each preset, the way a repo extends it, and
  * compares the diagnostics line by line. The exit code proves nothing; the list is the test.
  *
- * Three things are pinned:
+ * The check pins:
  *
  * - the fixture's exact diagnostics, per preset. `base.json` must flag the `any`, the unused
  *   variable and the seventeen rules ESLint's `recommended` sets turn on that oxlint leaves
  *   outside its `correctness` category (typescript-eslint's `eslint-recommended` layer adds
  *   four of them: `no-var`, `prefer-const`, `prefer-rest-params`, `prefer-spread`); must NOT flag an unused `_`-prefixed argument or variable;
- *   and must say nothing about React. `react.json` adds the conditional hook and the stale effect
- *   dependency.
+ *   and must say nothing about React. `react.json` adds the conditional hook, the stale effect
+ *   dependency and an `eval` call in a component.
  * - the severity of every React rule `eslint-plugin-react-hooks@7`'s `recommended` sets, read back
  *   from `--print-config`. A fixture cannot trip all of them cheaply, and a rule that oxlint
  *   renames shows up here as `undefined` instead of as a pass.
@@ -94,6 +94,11 @@ export function rest(): number {
 export const spread = (list: number[]) => Math.max.apply(Math, list);
 pick;
 `,
+  "compiler.tsx": `export function Dynamic() {
+  const value = eval("1 + 1");
+  return <p>{value}</p>;
+}
+`,
   "hooks.tsx": `import { useEffect, useState } from "react";
 import { Trans } from "react-i18next";
 
@@ -124,6 +129,7 @@ export function Footer() {
 const BASE_DIAGNOSTICS = [
   "base.ts:1 error typescript(no-explicit-any)",
   "base.ts:2 error eslint(no-unused-vars)",
+  "compiler.tsx:2 error eslint(no-eval)",
   "recommended.ts:1 error typescript(ban-ts-comment)",
   "recommended.ts:2 error eslint(no-array-constructor)",
   "recommended.ts:6 error eslint(no-case-declarations)",
@@ -145,6 +151,7 @@ const BASE_DIAGNOSTICS = [
 ];
 
 const REACT_DIAGNOSTICS = [
+  "compiler.tsx:2 warning react(unsupported-syntax)",
   "hooks.tsx:6 error react-hooks(rules-of-hooks)",
   "hooks.tsx:14 warning react-hooks(exhaustive-deps)",
 ];
@@ -157,6 +164,7 @@ const REACT_HOOKS_RECOMMENDED: Record<string, string> = {
   "react/use-memo": "deny",
   "react/preserve-manual-memoization": "deny",
   "react/incompatible-library": "warn",
+  "react/unsupported-syntax": "warn",
   "react/immutability": "deny",
   "react/globals": "deny",
   "react/refs": "deny",

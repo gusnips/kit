@@ -77,8 +77,12 @@ Measured 2026-11-13 by running `react.json` over the 22 checkouts that had an `a
 - Left on although ESLint never had them: `react/no-children-prop` (3 reports in 3 repos, all in tests
   that pass `children` to `createElement`) and the other `correctness` rules of the `react` plugin.
   They fire rarely and are right when they do.
-- `unsupported-syntax`, `config` and `gating` from the plugin do not exist in oxlint, and neither
-  does `no-octal`.
+- `config` and `gating` from the plugin do not exist in oxlint, and neither does `no-octal`.
+- Correction, measured 2026-11-15: oxlint 1.93.0 does have `react/unsupported-syntax`. Versions
+  0.1.0 through 0.2.0 left it out and wrongly listed it as unavailable. Version 0.2.1 restores it as
+  a warning, matching both `recommended` and `recommended-latest` in eslint-plugin-react-hooks
+  7.1.1. The check pins its severity and an `eval` call in a component. `base.json` is unchanged:
+  a repo keeping older hooks rules can extend it and enable only the rules it already had.
 
 # Changing a preset
 
@@ -91,5 +95,5 @@ version.
 `recommended` arrays.** 0.1.0 shipped without `no-var`, `prefer-const`, `prefer-rest-params` and
 `prefer-spread`: typescript-eslint's `eslint-recommended` layer turns them on for TypeScript files,
 and the same layer turns off the rules TypeScript checks itself, so the two arrays read by hand miss
-both. Diff the printed rules against `oxlint --print-config` over the preset. On 2026-11-14 the only
-rule ESLint enforces and the preset lacks is `no-octal`, which oxlint has no rule for.
+both. Diff the printed rules against `oxlint --print-config` over the preset. Outside the React
+rules, the 2026-11-14 comparison found only `no-octal` missing, which oxlint has no rule for.

@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/oxlint",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "One oxlint config for a TypeScript repo, and one for a React repo. Rules go on top of it in the repo's own .oxlintrc.json.",
   "type": "module",
   "license": "MIT",
@@ -12,11 +12,13 @@
   "exports": {
     "./base.json": "./base.json",
     "./react.json": "./react.json",
+    "./react-hooks": "./react-hooks.js",
     "./plugin": "./plugin.js"
   },
   "files": [
     "base.json",
     "react.json",
+    "react-hooks.js",
     "plugin.js",
     "README.md",
     "LICENSE"
@@ -55,5 +57,8 @@
     "type": "git",
     "url": "git+https://github.com/gusnips/kit.git",
     "directory": "oxlint"
+  },
+  "dependencies": {
+    "eslint-plugin-react-hooks": "7.1.1"
   }
 }

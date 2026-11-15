@@ -41,11 +41,11 @@ that:
 - `rules-of-hooks` (error) and `exhaustive-deps` (warning).
 - The React Compiler rules: `static-components`, `use-memo`, `preserve-manual-memoization`,
   `immutability`, `globals`, `refs`, `set-state-in-effect`, `error-boundaries` and
-  `set-state-in-render` (errors), and `incompatible-library` (warning).
+  `set-state-in-render` (errors), and `incompatible-library` and `unsupported-syntax` (warnings).
 
 Not there:
 
-- `unsupported-syntax`, `config` and `gating`. oxlint does not have them yet.
+- `config` and `gating`. oxlint does not have them yet.
 - `no-octal`. oxlint has no such rule, and TypeScript rejects octal literals.
 - `react/purity` is off. It reports `new Date()` in a component, and the ESLint plugin does not. The
   plugin still reports `Date.now()` and `Math.random()`.

@@ -46,6 +46,20 @@ export interface RunError {
   message?: string;
 }
 
+/** A run's saved state, read without claiming or changing it. */
+export interface StoredRun {
+  id: string;
+  kind: string;
+  owner: string;
+  status: RunStatus;
+  input: unknown;
+  /** The last value passed to `run.save`, or `null` before a save. */
+  checkpoint: unknown;
+  /** What the handler returned as JSON, or `null` when no result was stored. */
+  result: unknown;
+  error: RunError | null;
+}
+
 export interface RunsOptions {
   /** The runs table from the README, with its schema: `app.runs`. */
   table: string;
@@ -89,7 +103,7 @@ export interface RunLimits {
 export interface RunSpec {
   /** Which handler drives it: a key of the handlers you pass to `drive`. */
   kind: string;
-  /** Whose run it is, for your own check before a tail or a cancel. This module checks nothing. */
+  /** Whose run it is. `read` checks this; `tail` and `cancel` do not. */
   owner: string;
   /** What the handler reads as `run.input`. Stored as JSON. */
   input: unknown;
@@ -309,6 +323,8 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
   const createSql = `INSERT INTO ${runs} (id, root_id, kind, owner, restart, input, max_crashes,
       limits)
     VALUES ($1, $1, $2, $3, $4, $5::json, $6, $7::json)`;
+  const loadSql = `SELECT id, kind, owner, status, input, checkpoint, result, error FROM ${runs}
+    WHERE id = $1 AND owner = $2`;
 
   // A queued row, or a running one whose lease ran out and whose policy lets it go on. Taking over
   // a lease counts a crash; claiming a row a drain put back does not. `prev` reads the row under
@@ -881,6 +897,16 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
         JSON.stringify(limits),
       ]);
       return { id };
+    },
+
+    /**
+     * Reads the saved state without starting or changing the run. Returns `null` if the run is
+     * missing or belongs to another owner. Pass an owner your host has authenticated, not one
+     * supplied in a request. Validate the unknown payloads before using them.
+     */
+    async read(runId: string, owner: string): Promise<StoredRun | null> {
+      const { rows } = await pool.query<StoredRun>(loadSql, [runId, owner]);
+      return rows[0] ?? null;
     },
 
     /**

@@ -978,6 +978,22 @@ it threw. `onError` gets the thrown error too, with its stack. `drive` itself th
 database fails. So a job delivered twice does no harm: the second `drive` finds the run held or
 finished, and returns `"skipped"`.
 
+Read the saved state without starting or changing the run:
+
+```ts
+const saved = await runs.read(id, userId); // null if missing or owned by someone else
+```
+
+`read` returns a `StoredRun` with `id`, `kind`, `owner`, `status`, `input`, `checkpoint`, `result`
+and `error`. It reads the configured runs table and checks both the id and owner in SQL. Pass an
+owner from your authenticated context, never an unchecked request field. `input`, `checkpoint`
+and `result` are `unknown`; validate them before use. `checkpoint` is the last saved value,
+regardless of the restart policy. `result` and `checkpoint` are `null` until stored; `error` is
+`RunError | null`. Database failures throw, rather than returning `null`.
+
+The closing `end` event holds only `status` and `error`. Call `read` to load the saved result or
+checkpoint. `tail` and `cancel` still need your ownership check before you call them.
+
 **When the worker dies.** A worker holds its run with a lease, renewed every 5 seconds. A lease
 that is not renewed runs out after 15. The next `drive` then takes the run over, counts a crash,
 and does what the run's `restart` says:
@@ -1007,7 +1023,7 @@ Server-Sent Events stream:
 import { streamSSE } from "hono/streaming";
 
 app.get("/runs/:id/events", async (c) => {
-  // Check that the run belongs to the caller first. This module checks nothing.
+  // Check ownership with runs.read(id, authenticatedOwner) before tailing.
   const after = Number(c.req.header("last-event-id")) || 0;
   return streamSSE(c, async (stream) => {
     for await (const event of runs.tail(c.req.param("id"), after, c.req.raw.signal))

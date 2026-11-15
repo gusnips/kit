@@ -134,7 +134,7 @@
     },
     "react": {
       "name": "@gusnips/react",
-      "version": "0.10.3",
+      "version": "0.11.0",
       "dependencies": {
         "@gusnips/http": "workspace:*",
         "clsx": "^2.1.1",
@@ -203,7 +203,7 @@
     },
     "server": {
       "name": "@gusnips/server",
-      "version": "0.19.0",
+      "version": "0.20.0",
       "devDependencies": {
         "@gusnips/http": ">=0.2.0 <1",
         "@hono/node-server": "^2.1.5",
@@ -260,7 +260,7 @@
     },
     "vite": {
       "name": "@gusnips/vite",
-      "version": "0.9.3",
+      "version": "0.10.0",
       "dependencies": {
         "@gusnips/react": "workspace:*",
       },

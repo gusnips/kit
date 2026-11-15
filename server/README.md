@@ -530,6 +530,76 @@ caught. A driver's `TypeError` is not an auth outage and answers false.
 `@supabase/supabase-js` is an optional peer, behind the `/supabase` subpath, so importing
 `@gusnips/server` never installs it.
 
+## A security check before sending mail or spending money
+
+```ts
+const verdict = await verifyHuman({ token }); // { ok: true }, or a refusal reason.
+```
+
+Cloudflare Turnstile checks a human form in the browser. Your endpoint must verify its token
+before sending mail or running anonymous paid work:
+
+```ts
+import { createTurnstileVerifier } from "@gusnips/server";
+
+const verifyHuman = createTurnstileVerifier({
+  secret: env.TURNSTILE_SECRET,
+  hostnames: ["app.example.com"],
+  action: "contact",
+});
+
+const verdict = await verifyHuman({ token, remoteIp: clientIp });
+if (!verdict.ok) {
+  if (verdict.reason === "refused") throw errors.securityCheck();
+  throw errors.securityCheckUnavailable();
+}
+```
+
+`errors`, `token` and `clientIp` belong to your app. Take the address from a trusted server source,
+such as `clientIpOf`, or omit it. Hostnames and action come from server config, never the request.
+They must exactly match the provider's answer. The browser uses the same action with
+`useTurnstile` from `@gusnips/react/turnstile`.
+
+The result is `ok: true`, or `ok: false` with one of three reasons:
+
+| Reason           | What happened                                                                                       | What the endpoint does                                   |
+| ---------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `refused`        | The token is missing, invalid, expired, used, or from another hostname/action.                      | Run no work. Ask for a fresh check.                      |
+| `unavailable`    | Cloudflare did not answer, returned an unreadable result or reported a service/configuration error. | Run no work. Preserve input and offer a retry.           |
+| `not-configured` | The secret is unset.                                                                                | Run no work. Set server config before opening this form. |
+
+For local development with [Cloudflare's published test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/),
+select `mode: "test-key"` explicitly instead of supplying `hostnames` and `action`:
+
+```ts
+const verifyLocal = createTurnstileVerifier({ mode: "test-key", secret: localTestSecret });
+```
+
+That mode accepts only the three published dummy secrets. A real or missing secret throws at
+creation. Cloudflare's dummy success answer names `example.com` and has no action, so it cannot
+prove hostname/action binding. Test those comparisons with real keys. Select this mode only for
+an explicit loopback development origin; never infer it from a missing key or an HTTP URL alone.
+Default/live mode always checks hostname and action, even when a dummy secret was supplied.
+
+The request and body read have an 8-second deadline (`timeoutMs` changes it). The caller settles
+at that deadline even if a custom fetcher or response body ignores abort. Unread HTTP-error bodies
+are cancelled. There is one request, no automatic retry. `fetcher` accepts a plain callable with a
+URL string and optional `RequestInit`, with no runtime-specific properties. A token lasts five
+minutes and verifies once: every retry needs a fresh one.
+The helper logs nothing and returns no secret, token, provider body or raw error. Keep those out
+of request logs too.
+
+Use this verifier only when your app owns verification. When a form sends `captchaToken` to
+GoTrue, GoTrue verifies it instead. Verifying here first consumes the token and makes GoTrue
+refuse it. Deploy all token-capable clients before enabling GoTrue globally; a web-only change
+can block a native client that uses the same auth service. An unset browser site key is only a
+rollout state, never evidence that this endpoint is protected.
+
+Keep the widget limited to the product's hostnames and allow Cloudflare's challenge origin in
+`script-src`, `frame-src` and `connect-src`. Only a public site key goes to the browser. Keep
+rate limits and spending caps beside the check. Do not put CAPTCHA on API keys, OAuth code/device
+flows, MCP, webhooks or CLIs.
+
 ## Postgres
 
 If your API talks to Postgres through `pg`, two lines in the pool decide whether a bad minute

@@ -55,6 +55,13 @@ export { createSealer, SealError } from "./seal.ts";
 export type { Sealer, SealerOptions, SealErrorReason, SealKey } from "./seal.ts";
 export { signToken, verifyToken } from "./token.ts";
 export type { TokenRefusalReason, TokenVerdict } from "./token.ts";
+export { createTurnstileVerifier } from "./turnstile.ts";
+export type {
+  TurnstileInput,
+  TurnstileVerdict,
+  TurnstileVerifierOptions,
+  VerifyTurnstile,
+} from "./turnstile.ts";
 export { listUnsubscribeHeaders } from "./unsubscribe.ts";
 export { textFromHtml } from "./text-from-html.ts";
 export { EnvError, envProblems, validateEnv } from "./env.ts";

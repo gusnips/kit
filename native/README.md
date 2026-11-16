@@ -30,6 +30,7 @@ meet at launch.
 | `@gusnips/native/query`       | `installQueryManagers`: React Query on app focus and network             | `@tanstack/react-query`, netinfo                      |
 | `@gusnips/native/i18n`        | `createNativeLanguage`: the phone's language, or the saved one           | `react-native-localize`, async-storage, `i18next`     |
 | `@gusnips/native/supabase`    | `supabaseAuthStorage`: where supabase-js keeps the session               | async-storage, `@supabase/supabase-js`                |
+| `@gusnips/native/turnstile`   | `useTurnstile`: a security check for sign-in and other human forms       | `react-native-webview`                                |
 | `@gusnips/native/metro`       | `nativeMetroConfig`, for `metro.config.js`                               | nothing more                                          |
 | `@gusnips/native/css`         | `buildNativeCss` and the `gusnips-native-css` command                    | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
 | `gusnips-native-hermes-check` | compiles the production bundle with Hermes, without Xcode                | `hermes-compiler`                                     |
@@ -185,6 +186,59 @@ It re-renders when the theme changes, including the phone's own switch while the
 
 From a script, the same build is `buildNativeCss({ palette })` from `@gusnips/native/css`, and the
 watch is `watchNativeCss(options, { onBuild, onError })`.
+
+## A security check on a human form
+
+Cloudflare Turnstile needs a web page to run in, and a phone app has none. `useTurnstile` runs the
+widget in a small WebView and gives you the same thing the web hook gives: one token for one
+request.
+
+```tsx
+import { useTurnstile } from "@gusnips/native/turnstile";
+
+const check = useTurnstile({
+  siteKey: TURNSTILE_SITE_KEY,
+  action: "signin",
+  origin: "https://app.example.com",
+  language: "pt-br",
+});
+
+// Near the submit button:
+<>{check.view}</>;
+
+// On submit:
+const captchaToken = await check.take();
+await supabase.auth.signInWithPassword({ email, password, options: { captchaToken } });
+```
+
+Install `react-native-webview` (14 or later) and rebuild the app: it carries native code.
+
+- `origin` is the https address your widget is registered for, with no path. The WebView loads its
+  page as if it came from there, and that hostname is what Cloudflare puts on the token. Use one
+  the widget allows, and one of your verifier's `hostnames` when your own API checks the token.
+  Anything else throws on the first render.
+- `check.view` stays out of sight until Cloudflare needs the person, then shows where you put it,
+  65 points high. Keep room for it under the button.
+- `state`, `take()`, `retry()` and `TurnstileError` work as in the Turnstile section of
+  `@gusnips/react`, because both run the same state machine. Write your own words for `failed`,
+  `unavailable` and `unsupported`. On a phone, `unsupported` means the system WebView is too old:
+  ask the person to update it.
+- Nothing loads until the person acts. The first `take()` or `retry()` mounts the WebView, so
+  set the button pending when it is pressed and let the sign-in wait. A WebView costs memory and a
+  trip to Cloudflare, and a screen that is only opened should not pay either. `eager: true` mounts
+  it with the screen instead, for a form whose first press must not wait. The web hook starts on
+  mount by default; this one does not.
+- Each email send and resend needs its own token. Verifying an emailed code does not.
+- Send a token to your API verifier or to Supabase's `captchaToken`, never to both: the first
+  server to check it spends it. Keep OAuth, API keys and every other machine sign-in out of it.
+
+The WebView is locked. It loads its own page and the Cloudflare frame inside it, and nothing else:
+a link tapped in the widget does nothing, there is no file access, and no new window opens. A
+message counts only when it carries the code of the check that is running. The token goes to the one
+`take()` waiting for it. It is never logged or saved.
+
+Run it once on an iPhone and on an Android phone before you turn on Supabase's CAPTCHA setting
+for the project.
 
 ## Streams
 

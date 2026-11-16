@@ -66,7 +66,15 @@ const PACKAGES = [
  * files at the source.
  */
 const BUNDLE_ONLY: Record<string, readonly string[]> = {
-  "@gusnips/native": [".", "./theme", "./network", "./query", "./i18n", "./supabase"],
+  "@gusnips/native": [
+    ".",
+    "./theme",
+    "./network",
+    "./query",
+    "./i18n",
+    "./supabase",
+    "./turnstile",
+  ],
 };
 
 /** The commands a bin dispatches to. Each one is run with `--help` from the unpacked tarball. */

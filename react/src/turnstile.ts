@@ -1,37 +1,15 @@
 import { useMemo, useSyncExternalStore, type RefCallback } from "react";
+import {
+  createTurnstileMachine,
+  TURNSTILE_ORIGIN,
+  TurnstileError,
+  type TurnstileState,
+} from "./turnstile-machine.ts";
 
-export const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
+export { TURNSTILE_ORIGIN, TurnstileError, type TurnstileState };
+
 const SCRIPT_URL = `${TURNSTILE_ORIGIN}/turnstile/v0/api.js?render=explicit`;
 const LOAD_TIMEOUT_MS = 30_000;
-const TOKEN_TIMEOUT_MS = 60_000;
-const TOKEN_LIFETIME_MS = 300_000;
-
-export type TurnstileState =
-  | "off"
-  | "idle"
-  | "loading"
-  | "ready"
-  | "interactive"
-  | "failed"
-  | "unavailable"
-  | "unsupported";
-
-export class TurnstileError extends Error {
-  constructor(readonly reason: "failed" | "unavailable" | "unsupported" | "busy" | "cancelled") {
-    super(
-      {
-        failed: "The security check did not finish. Try again.",
-        unavailable:
-          "The security check could not load. Check your connection or blocker, then retry.",
-        unsupported:
-          "This browser cannot run the security check. Update it or use another browser.",
-        busy: "A security check is already pending. Wait for that request to finish.",
-        cancelled: "The form changed or closed. Start the request again on the current form.",
-      }[reason],
-    );
-    this.name = "TurnstileError";
-  }
-}
 
 export interface TurnstileOptions {
   /** Public widget key. Unset means off, not that server protection is active. */
@@ -126,11 +104,6 @@ function loadTurnstile(): Promise<TurnstileApi> {
   return attempt;
 }
 
-interface PendingToken {
-  resolve: (token: string) => void;
-  reject: (error: TurnstileError) => void;
-}
-
 /** A callback ref owns a widget's lifetime, including StrictMode's cleanup and remount. */
 function createWidget({
   siteKey,
@@ -140,155 +113,75 @@ function createWidget({
   eager = true,
 }: TurnstileOptions) {
   let element: HTMLDivElement | null = null;
-  let state: TurnstileState = siteKey ? "idle" : "off";
-  let token: { value: string; expiresAt: number } | null = null;
-  let pending: PendingToken | null = null;
-  let stopRound = () => {};
-  const listeners = new Set<() => void>();
-  const setState = (next: TurnstileState) => {
-    state = next;
-    for (const listener of listeners) listener();
-  };
-  const fail = (reason: "failed" | "unavailable" | "unsupported" | "cancelled") => {
-    token = null;
-    const waiting = pending;
-    pending = null;
-    waiting?.reject(new TurnstileError(reason));
-    stopRound();
-    if (reason !== "cancelled") setState(reason);
-  };
-
-  function start() {
-    if (!siteKey || !element) return;
-    stopRound();
-    token = null;
-    setState("loading");
-    let live = true;
-    let widget: { api: TurnstileApi; id: string } | null = null;
-    stopRound = () => {
-      if (!live) return;
-      live = false;
-      if (widget) {
-        try {
-          widget.api.remove(widget.id);
-        } catch {
-          // The SDK must not break React cleanup or the token promise's settlement.
+  const machine = createTurnstileMachine({
+    enabled: Boolean(siteKey),
+    eager,
+    driver: (round) => {
+      let stopped = false;
+      let widget: { api: TurnstileApi; id: string } | null = null;
+      void loadTurnstile().then(
+        (api) => {
+          if (stopped || !element || !siteKey) return;
+          try {
+            const id = api.render(element, {
+              sitekey: siteKey,
+              action,
+              language: language.toLowerCase(),
+              theme,
+              appearance: "interaction-only",
+              size: element.clientWidth < 300 ? "compact" : "flexible",
+              "response-field": false,
+              "refresh-expired": "never",
+              retry: "never",
+              callback: round.token,
+              "expired-callback": round.expired,
+              "error-callback": () => {
+                round.failed();
+                return true;
+              },
+              "timeout-callback": round.failed,
+              "unsupported-callback": round.unsupported,
+              "before-interactive-callback": round.interactive,
+              "after-interactive-callback": round.afterInteractive,
+            });
+            if (!id) return round.failed();
+            // A callback can consume a token synchronously inside render, ending this round.
+            if (stopped) api.remove(id);
+            else widget = { api, id };
+          } catch {
+            round.failed();
+          }
+        },
+        () => round.unavailable(),
+      );
+      return () => {
+        stopped = true;
+        if (widget) {
+          try {
+            widget.api.remove(widget.id);
+          } catch {
+            // The SDK must not break React cleanup or the token promise's settlement.
+          }
         }
-      }
-    };
-    void loadTurnstile().then(
-      (api) => {
-        if (!live || !element) return;
-        const refuse = () => {
-          if (live) fail("failed");
-        };
-        try {
-          const id = api.render(element, {
-            sitekey: siteKey,
-            action,
-            language: language.toLowerCase(),
-            theme,
-            appearance: "interaction-only",
-            size: element.clientWidth < 300 ? "compact" : "flexible",
-            "response-field": false,
-            "refresh-expired": "never",
-            retry: "never",
-            callback: (value) => {
-              if (!live) return;
-              if (!value) return refuse();
-              const waiting = pending;
-              if (waiting) {
-                // The token goes to one waiter, never into state where a second take can see it.
-                pending = null;
-                waiting.resolve(value);
-                start();
-              } else {
-                token = { value, expiresAt: Date.now() + TOKEN_LIFETIME_MS };
-                setState("ready");
-              }
-            },
-            "expired-callback": () => {
-              if (live) start();
-            },
-            "error-callback": () => {
-              refuse();
-              return true;
-            },
-            "timeout-callback": refuse,
-            "unsupported-callback": () => {
-              if (live) fail("unsupported");
-            },
-            "before-interactive-callback": () => {
-              if (live) setState("interactive");
-            },
-            "after-interactive-callback": () => {
-              if (live && !token) setState("loading");
-            },
-          });
-          if (!id) return refuse();
-          // A callback can consume a token synchronously inside render, ending this round.
-          if (live) widget = { api, id };
-          else api.remove(id);
-        } catch {
-          refuse();
-        }
-      },
-      () => {
-        if (live) fail("unavailable");
-      },
-    );
-  }
+      };
+    },
+  });
 
   const container: RefCallback<HTMLDivElement> = (node) => {
     element = node;
-    if (eager) start();
+    if (node) machine.attach();
     return () => {
       element = null;
-      fail("cancelled");
-      setState(siteKey ? "idle" : "off");
+      machine.detach();
     };
   };
 
-  function take(): Promise<string | undefined> {
-    if (!siteKey) return Promise.resolve(undefined);
-    if (!element) return Promise.reject(new TurnstileError("cancelled"));
-    if (state === "unsupported") return Promise.reject(new TurnstileError("unsupported"));
-    if (pending) return Promise.reject(new TurnstileError("busy"));
-    const available = token;
-    // Consume before yielding, not after a React state update or an awaited promise.
-    token = null;
-    if (available && available.expiresAt > Date.now()) {
-      start();
-      return Promise.resolve(available.value);
-    }
-    const promise = new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => fail("failed"), TOKEN_TIMEOUT_MS);
-      pending = {
-        resolve: (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      };
-    });
-    if (available || state === "idle" || state === "failed" || state === "unavailable") start();
-    return promise;
-  }
-
   return {
     container,
-    take,
-    retry: () => {
-      if (state !== "unsupported") start();
-    },
-    getSnapshot: () => state,
-    subscribe: (listener: () => void) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    take: machine.take,
+    retry: machine.retry,
+    getSnapshot: machine.getSnapshot,
+    subscribe: machine.subscribe,
   };
 }
 

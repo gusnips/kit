@@ -1108,14 +1108,14 @@ Storage failures reject the promise. A lost lease rejects with `RunStopped`, cod
 aborts `run.signal`; a drain keeps its existing `"shutdown"` reason. Catching a storage failure
 does not break the event queue or prevent the run from closing.
 
-If an INSERT's answer is lost, `append` locks the root and reads that sequence range back. Only
-an exact match of all types and stored JSON text counts as success. An empty range permits one
-retry with the same payload, sequence numbers and worker token. The INSERT is atomic and the
-`(run_id, seq)` primary key admits only one copy, even if the first attempt arrives late. A
-partial or different batch is a conflict, not a success. If the read also fails, later event
-writes must resolve that old range before writing more. A conflict blocks them until the run
-ends or another worker takes over. Do not replay a rejected batch yourself: it may already be
-stored.
+Each batch locks the root in a transaction before sending its INSERT. If the answer is lost,
+`append` takes an exclusive root lock before reading that sequence range back. This waits for
+any earlier write transaction to end, even when its INSERT is still waiting on a table lock.
+Only an exact match of all types and stored JSON text counts as success. An empty range permits
+one retry with the same payload, sequence numbers and worker token. A partial or different batch
+is a conflict, not a success. If the read also fails, later event writes must resolve that old
+range before writing more. A conflict blocks them until the run ends or another worker takes
+over. Do not replay a rejected batch yourself: it may already be stored.
 
 Call `append` only from trusted worker code on its current `Run`. It does not add buffering,
 save a checkpoint, remove secrets or prevent replay across worker restarts. Payload choices,

@@ -428,7 +428,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
       SELECT id, $7, 'end', json_build_object('status', status, 'error', error) FROM done)
     SELECT result FROM done`;
 
-  // What every way of ending a root shares, run in `closing`, behind a lock on the root. Whatever
+  // What every way of ending a root shares, run in `underRootLock`, behind a lock on the root. Whatever
   // is still open below it ends too: cancelled under a cancelled root, interrupted otherwise. Each
   // run that ended gets its closing event in the same statement, so a tail that reads a run as
   // finished finds the closing event too.
@@ -457,6 +457,10 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
         THEN NULL ELSE $5::json END,
       lease_token = NULL, lease_until = NULL, finished_at = now(), updated_at = now()
     WHERE id = $1 AND lease_token = $2 AND status = 'running'`);
+  // Lock before dispatching an awaited INSERT. Its inline fence can otherwise wait behind an
+  // events-table lock, letting reconciliation overtake a timed-out write that can still commit.
+  const lockAppendSql = `SELECT 1 FROM ${runs}
+    WHERE id = $1 AND lease_token = $2 AND status = 'running' FOR SHARE`;
   // The first statement of a close: the root, still held by this worker's token.
   const lockHeldSql = `SELECT 1 FROM ${runs}
     WHERE id = $1 AND lease_token = $2 AND status = 'running' FOR UPDATE`;
@@ -587,26 +591,25 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
   }
 
   /**
-   * Runs `close` in one transaction whose first statement, `lock`, takes root rows FOR UPDATE.
-   * Every fenced write holds its root FOR SHARE, so the lock waits for the ones in flight to commit
-   * and keeps new ones out until the close commits. `close` runs after that wait, with a snapshot
-   * that sees what they wrote. As one statement, a close reads from before its own wait: its
-   * closing event collides with an append that landed meanwhile, and a child added meanwhile stays
-   * open under a finished root. Resolves to `undefined` when `lock` found nothing.
+   * Takes root locks in a separate statement before running `work` in the same transaction.
+   * Appends take FOR SHARE before sending their INSERT, so a close or reconciliation taking
+   * FOR UPDATE cannot overtake a write whose client timed out. A close reads from a fresh
+   * snapshot after its lock wait, including children and events committed during that wait.
+   * Resolves to `undefined` when `lock` found nothing.
    */
-  async function closing<Row extends QueryResultRow, R>(
+  async function underRootLock<Row extends QueryResultRow, R>(
     lock: string,
     values: unknown[],
-    close: (client: PoolClient, locked: Row[]) => Promise<R>,
+    work: (client: PoolClient, locked: Row[]) => Promise<R>,
   ): Promise<R | undefined> {
     const client = await pool.connect();
     let broken = false;
     try {
       await client.query("BEGIN");
       const { rows } = await client.query<Row>(lock, values);
-      const closed = rows.length > 0 ? await close(client, rows) : undefined;
+      const result = rows.length > 0 ? await work(client, rows) : undefined;
       await client.query("COMMIT");
-      return closed;
+      return result;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => (broken = true));
       throw error;
@@ -618,7 +621,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
 
   /** Ends the dead workers' runs their policy ends: `runId` alone, or up to `limit` of them. */
   async function expire(runId: string | null, limit: number) {
-    const ended = await closing<{ id: string }, { status: "failed" | "cancelled" }[]>(
+    const ended = await underRootLock<{ id: string }, { status: "failed" | "cancelled" }[]>(
       lockExpiredSql,
       [runId, limit],
       async (client, locked) =>
@@ -655,7 +658,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
     const batch = node.pending;
     if (!batch) return false;
     if (released(tree.controller.signal)) throw tree.controller.signal.reason;
-    const kept = await closing(lockHeldSql, [tree.rootId, tree.token], async (client) => {
+    const kept = await underRootLock(lockHeldSql, [tree.rootId, tree.token], async (client) => {
       const { rows } = await client.query<{ seq: number; type: string; data: string | null }>(
         appendedSql,
         [node.id, batch.after, batch.after + batch.types.length],
@@ -691,15 +694,16 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
       if (released(tree.controller.signal)) throw tree.controller.signal.reason;
       node.pending = batch;
       try {
-        const { rowCount } = await pool.query(appendSql, values);
-        if (rowCount !== batch.types.length) throw lose(tree);
+        const appended = await underRootLock(lockAppendSql, [tree.rootId, tree.token], (client) =>
+          client.query(appendSql, values),
+        );
+        if (appended?.rowCount !== batch.types.length) throw lose(tree);
         if (released(tree.controller.signal)) throw tree.controller.signal.reason;
       } catch (error) {
         if (await reconcileAppend(tree, node)) return;
         if (attempt === 1) throw error;
         // One retry, only after an empty read-back, with the SAME range, payload and fence.
-        // An INSERT is atomic and (run_id, seq) is unique: even if the first attempt lands late,
-        // one whole batch wins and the other fails, then must match exactly on read-back.
+        // The read-back's root lock proves the prior transaction ended before reusing its range.
         continue;
       }
       node.seq = batch.after + batch.types.length;
@@ -808,7 +812,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
     if (tree.drained) return tree.drained;
     if (stopCode(tree.controller.signal) === "lost") return "lost";
     const { status, result, error } = verdict(tree.controller.signal, tree.rootId, kind, outcome);
-    const ended = await closing(
+    const ended = await underRootLock(
       lockHeldSql,
       [tree.rootId, tree.token],
       async (client) =>
@@ -928,7 +932,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
   async function shutDown(tree: Tree, started: boolean): Promise<DriveOutcome> {
     const values = [tree.rootId, tree.token];
     try {
-      const outcome = await closing(lockHeldSql, values, async (client) => {
+      const outcome = await underRootLock(lockHeldSql, values, async (client) => {
         const ended = (
           await client.query<{ status: "failed" | "cancelled" }>(interruptSql, [...values, started])
         ).rows[0];
@@ -1142,7 +1146,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
      * had already finished, or does not exist.
      */
     async cancel(runId: string): Promise<boolean> {
-      const cancelled = await closing(lockTreeSql, [runId], async (client) => {
+      const cancelled = await underRootLock(lockTreeSql, [runId], async (client) => {
         if ((await client.query(cancelSql, [runId])).rows.length === 0)
           await client.query(flagCancelSql, [runId]);
         return true;

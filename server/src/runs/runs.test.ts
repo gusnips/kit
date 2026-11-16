@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Pool, type QueryResult } from "pg";
+import { Pool, type PoolClient, type QueryResult } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eventually } from "../__tests__/eventually.ts";
 import { hasPostgres, startPostgres } from "../__tests__/postgres-server.ts";
@@ -129,11 +129,29 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
   }
   const isAppend = (text: string) => text.startsWith("INSERT INTO app.run_events");
 
-  /** Faults wrap real INSERTs; the read-back and the fence still run against Postgres. */
-  function inserts(intercept: (send: () => Promise<QueryResult>) => Promise<QueryResult>) {
-    // pg has eight query overloads; this wrapper forwards the text/values overload runs uses.
+  /** Faults wrap real INSERTs or their COMMIT; the read-back and fence still run on Postgres. */
+  function inserts(
+    intercept: (send: () => Promise<QueryResult>) => Promise<QueryResult>,
+    atCommit = false,
+  ) {
+    // pg has eight query overloads; these wrappers forward the text/values overload runs uses.
+    // The transaction helper only calls query and release on its PoolClient.
     return {
-      connect: () => pool.connect(),
+      connect: async () => {
+        const client = await pool.connect();
+        let wrote = false;
+        return {
+          release: (broken: boolean) => client.release(broken),
+          query: (text: string, values?: unknown[]) => {
+            const send = () => client.query(text, values);
+            if (isAppend(text)) {
+              wrote = true;
+              if (!atCommit) return intercept(send);
+            }
+            return atCommit && wrote && text === "COMMIT" ? intercept(send) : send();
+          },
+        } as unknown as PoolClient;
+      },
       query: (text: string, values?: unknown[]) => {
         const send = () => pool.query(text, values);
         return isAppend(text) ? intercept(send) : send();
@@ -399,7 +417,7 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
         const result = await send();
         if (++writes === 1) throw new Error("connection lost after commit");
         return result;
-      }),
+      }, true),
     );
     const { id } = await runs.create(SPEC);
     expect(
@@ -490,10 +508,10 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
           const result = await send();
           if (++writes === 1) {
             await pool.query("ALTER TABLE app.run_events RENAME TO unavailable_events");
-            throw new Error("connection lost after insert");
+            throw new Error("connection lost after commit");
           }
           return result;
-        }),
+        }, true),
       );
       const { id } = await runs.create(SPEC);
       let target = id;
@@ -521,6 +539,73 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     },
   );
 
+  it.each([false, true])(
+    "does not reuse a timed-out batch range while its INSERT can still run (child: %s)",
+    async (child) => {
+      const applicationName = `append-timeout-${crypto.randomUUID()}`;
+      const timed = new Pool({
+        connectionString: server.url,
+        application_name: applicationName,
+        query_timeout: 150,
+      });
+      const locker = await pool.connect();
+      const runs = store({}, timed);
+      const { id } = await runs.create(SPEC);
+      let target = id;
+      try {
+        await locker.query("BEGIN");
+        // INSERT needs ROW EXCLUSIVE on the events table before it evaluates its root fence.
+        // SELECT can still read the empty range. A pg query_timeout does not cancel the INSERT.
+        await locker.query("LOCK TABLE app.run_events IN SHARE MODE");
+        const work = async (run: Run) => {
+          target = run.id;
+          await expect(run.append([{ type: "late" }])).rejects.toThrow("Query read timeout");
+          expect(await eventsOf(target)).toEqual([]);
+          expect(
+            (
+              await pool.query(
+                `SELECT 1 FROM pg_stat_activity WHERE application_name = $1
+                  AND wait_event_type = 'Lock' AND query LIKE 'INSERT INTO app.run_events%'`,
+                [applicationName],
+              )
+            ).rows.length,
+          ).toBeGreaterThan(0);
+          // Without the pre-INSERT lock, both attempts have timed out and reconciled as empty
+          // here. Releasing the table then lets an old attempt commit the supposedly free seq.
+          await locker.query("ROLLBACK");
+          await eventually(
+            async () =>
+              (
+                await pool.query(
+                  `SELECT 1 FROM pg_stat_activity WHERE application_name = $1
+                  AND state <> 'idle'`,
+                  [applicationName],
+                )
+              ).rows.length === 0,
+          );
+          await run.append([{ type: "next" }]);
+          return "done";
+        };
+        expect(
+          await runs.drive(id, {
+            report: (run) =>
+              child ? run.child("c", { kind: "work", input: null }, work) : work(run),
+          }),
+        ).toBe("succeeded");
+        expect(await rowOf(target)).toMatchObject({ status: "succeeded", result: '"done"' });
+        expect((await eventsOf(target)).map((event) => `${event.seq} ${event.type}`)).toEqual([
+          "1 next",
+          "2 end",
+        ]);
+        expect(errors).toEqual([]);
+      } finally {
+        await locker.query("ROLLBACK");
+        locker.release();
+        await timed.end();
+      }
+    },
+  );
+
   it("rejects lease loss even when the uncertain batch is already stored", async () => {
     let writes = 0;
     let id = "";
@@ -532,7 +617,7 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
         await expireLease(id);
         await store().drive(id, { report: async () => "new worker" });
         throw new Error("lost answer");
-      }),
+      }, true),
     );
     ({ id } = await runs.create({ ...SPEC, restart: "resume" }));
     let rejected: unknown;
@@ -551,15 +636,18 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
 
   it("rejects an append answered after the worker's lease deadline", async () => {
     const stopped = gate();
+    const delayed = inserts(async (send) => {
+      const result = await send();
+      await stopped.opened;
+      return result;
+    }, true);
     // pg's overloaded query type also covers callbacks; this wrapper uses only text and values.
     const db = {
-      connect: () => pool.connect(),
-      query: async (text: string, values?: unknown[]) => {
-        if (text.includes("RETURNING cancel_requested_at")) return new Promise<never>(() => {});
-        const result = await pool.query(text, values);
-        if (isAppend(text)) await stopped.opened;
-        return result;
-      },
+      connect: delayed.connect,
+      query: (text: string, values?: unknown[]) =>
+        text.includes("RETURNING cancel_requested_at")
+          ? new Promise<never>(() => {})
+          : delayed.query(text, values),
     } as unknown as Pick<Pool, "query" | "connect">;
     const runs = store({ leaseSecs: 1 }, db);
     const { id } = await runs.create({ ...SPEC, restart: "resume" });

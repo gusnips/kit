@@ -1084,7 +1084,43 @@ whose renewals go unanswered for 15 seconds, on a stuck database or a dropped ne
 `run.signal` the same way without waiting to find out. Pass `run.signal` to every provider call,
 so the late handler stops paying for tokens.
 
-**Events.** `run.emit(type, data)` returns at once, and the appends run in order behind the work.
+**Events.** `run.emit(type, data)` returns at once. Its writes run in order behind the work. A
+failed write goes to `onError`, leaves a gap in the sequence and does not fail the handler.
+
+When the worker needs to know an event is stored, use `append`:
+
+```ts
+await run.append([{ type: "ready" }]); // The event is now in Postgres.
+```
+
+`append(events: readonly { type: string; data?: unknown }[]): Promise<void>` writes the whole
+batch or none of it. It shares `emit`'s queue and sequence, including concurrent calls. `drive`
+and a child's finish wait for queued writes before adding `end`. A batch takes sequence numbers
+only once its rows are known stored. An empty batch does nothing; it is not a flush barrier.
+
+Each event needs a string `type` without null characters. Data is copied with `JSON.stringify`
+before the call returns its promise, so later mutation cannot change the batch. Omitted or
+`undefined` data becomes SQL NULL; explicit `null` stays JSON null. Other data must serialize to
+JSON. Bad input, including a circular value or bigint, rejects before any event in the batch is
+written. The usual JSON conversions still apply, such as omitting undefined object properties.
+
+Storage failures reject the promise. A lost lease rejects with `RunStopped`, code `"lost"`, and
+aborts `run.signal`; a drain keeps its existing `"shutdown"` reason. Catching a storage failure
+does not break the event queue or prevent the run from closing.
+
+Each batch locks the root in a transaction before sending its INSERT. If the answer is lost,
+`append` takes an exclusive root lock before reading that sequence range back. This waits for
+any earlier write transaction to end, even when its INSERT is still waiting on a table lock.
+Only an exact match of all types and stored JSON text counts as success. An empty range permits
+one retry with the same payload, sequence numbers and worker token. A partial or different batch
+is a conflict, not a success. If the read also fails, later event writes must resolve that old
+range before writing more. A conflict blocks them until the run ends or another worker takes
+over. Do not replay a rejected batch yourself: it may already be stored.
+
+Call `append` only from trusted worker code on its current `Run`. It does not add buffering,
+save a checkpoint, remove secrets or prevent replay across worker restarts. Payload choices,
+access checks and retention stay with your app. The existing tables need no migration.
+
 `runs.tail(id, afterSeq, signal)` yields every event after `afterSeq`, then each new one, until the
 run finishes. Every way a run ends adds a last event, `end`, with its `status` and `error`. As a
 Server-Sent Events stream:
@@ -1145,8 +1181,8 @@ const notes = found.flatMap((result) => (result.ok ? [result.value] : []));
   lends them its place, so a deep tree never waits on itself.
 - `run.spend(usd)` adds to the tree's spend, and the total is read back at every claim. A resumed
   run counts what it spent before, so it cannot buy past `budgetUsd` a second time.
-- Use a child's `run` only inside its function. After the function returns, `save`, `spend` and
-  `child` on it throw, and `emit` goes to `onError`. The rest of the tree goes on.
+- Use a child's `run` only inside its function. After the function returns, `save`, `spend`,
+  `child` and a nonempty `append` reject, and `emit` goes to `onError`. The rest of the tree goes on.
 
 **Cancel.** `runs.cancel(id)` stops a run and every child under it. Given a child's id, it stops
 the whole tree that child is in. A queued run ends at once. A running one finds out at its worker's

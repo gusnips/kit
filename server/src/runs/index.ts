@@ -18,8 +18,8 @@
  *   so a resumed parent that asks for a child it already ran gets the stored result back.
  * - **A screen watching a run needs a closing event.** Every way a run ends writes one, in the
  *   same statement, or a tail waits for a frame that never comes.
- * - **Appends never hold up the work, and never reorder.** `emit` returns at once; the appends run
- *   behind it one at a time, and a finish waits for them.
+ * - **Events never reorder.** `emit` returns at once; `append` waits for storage. Both use one
+ *   queue, and a finish waits for it.
  * - **A deploy must not wait for a run to finish.** One donor's deploys waited up to 35 minutes
  *   for its runs to end. Here `drain` gives them a few seconds, then puts a resumable run back in
  *   the queue, where the next process picks it up.
@@ -176,6 +176,22 @@ export interface Run {
    * does not finish before they do. One that fails goes to `onError`; it never throws.
    */
   emit(type: string, data?: unknown): void;
+  /**
+   * Stores a whole batch for `tail`, in order with `emit` and other `append` calls. Resolves only
+   * once every event is known stored under this worker's lease. Rejects storage failures, or
+   * `RunStopped` with code `lost` when the worker no longer holds the run.
+   *
+   * Snapshots each payload with JSON.stringify before queuing anything. Omitted data is SQL NULL;
+   * other values must serialize to JSON. An empty batch does nothing. Only call on the current
+   * handler's Run, not from a request or after the handler returns.
+   *
+   * An unclear write is read back by sequence and exact payload. Only an empty range permits one
+   * retry of that same batch; a conflicting range rejects. If storage also prevents that read,
+   * later event writes must resolve the old range before taking new sequence numbers. Do not
+   * replay a rejected batch yourself: it may already be stored. This is not a checkpoint save,
+   * a buffer or an exactly-once guarantee across worker restarts.
+   */
+  append(events: readonly { type: string; data?: unknown }[]): Promise<void>;
 }
 
 export type RunHandler = (run: Run) => Promise<unknown>;
@@ -262,12 +278,21 @@ interface Tree {
   drained?: Promise<DriveOutcome>;
 }
 
+/** Immutable JSON strings, with the sequence immediately before this batch. */
+interface AppendBatch {
+  after: number;
+  types: string[];
+  data: (string | null)[];
+}
+
 /** One run in a tree, with its own event sequence. */
 interface Node {
   id: string;
   depth: number;
   seq: number;
   appends: Promise<void>;
+  /** An unanswered INSERT must be reconciled before its sequence range can be reused. */
+  pending?: AppendBatch;
   /** The keys of its children running now. */
   keys: Set<string>;
   /** Its `maxParallel` slot: wanted while its function runs and waits on no child of its own. */
@@ -373,8 +398,14 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
   const saveSql = fenced("checkpoint = $4::json");
   const spendSql = fenced("cost_usd = c.cost_usd + $4");
   const appendSql = `INSERT INTO ${events} (run_id, seq, type, data)
-    SELECT $1::uuid, $4::int, $5::text, $6::json FROM ${runs} r
-    WHERE r.id = $2 AND r.lease_token = $3 AND r.status = 'running' FOR SHARE`;
+    SELECT $1::uuid, $4::int + e.ordinality::int, e.type, e.data::json
+    FROM (SELECT 1 FROM ${runs} r
+      WHERE r.id = $2 AND r.lease_token = $3 AND r.status = 'running' FOR SHARE) held,
+      unnest($5::text[], $6::text[]) WITH ORDINALITY AS e(type, data, ordinality)`;
+  // json::text keeps key order and distinguishes SQL NULL from JSON null. Comparing parsed JSON
+  // (or jsonb) would accept a different payload in a sequence range this worker thinks it owns.
+  const appendedSql = `SELECT seq, type, data::text AS data FROM ${events}
+    WHERE run_id = $1 AND seq > $2 AND seq <= $3 ORDER BY seq`;
 
   const findChildSql = `SELECT id, status, result, error FROM ${runs}
     WHERE parent_id = $1 AND child_key = $2`;
@@ -397,7 +428,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
       SELECT id, $7, 'end', json_build_object('status', status, 'error', error) FROM done)
     SELECT result FROM done`;
 
-  // What every way of ending a root shares, run in `closing`, behind a lock on the root. Whatever
+  // What every way of ending a root shares, run in `underRootLock`, behind a lock on the root. Whatever
   // is still open below it ends too: cancelled under a cancelled root, interrupted otherwise. Each
   // run that ended gets its closing event in the same statement, so a tail that reads a run as
   // finished finds the closing event too.
@@ -426,6 +457,10 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
         THEN NULL ELSE $5::json END,
       lease_token = NULL, lease_until = NULL, finished_at = now(), updated_at = now()
     WHERE id = $1 AND lease_token = $2 AND status = 'running'`);
+  // Lock before dispatching an awaited INSERT. Its inline fence can otherwise wait behind an
+  // events-table lock, letting reconciliation overtake a timed-out write that can still commit.
+  const lockAppendSql = `SELECT 1 FROM ${runs}
+    WHERE id = $1 AND lease_token = $2 AND status = 'running' FOR SHARE`;
   // The first statement of a close: the root, still held by this worker's token.
   const lockHeldSql = `SELECT 1 FROM ${runs}
     WHERE id = $1 AND lease_token = $2 AND status = 'running' FOR UPDATE`;
@@ -556,26 +591,25 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
   }
 
   /**
-   * Runs `close` in one transaction whose first statement, `lock`, takes root rows FOR UPDATE.
-   * Every fenced write holds its root FOR SHARE, so the lock waits for the ones in flight to commit
-   * and keeps new ones out until the close commits. `close` runs after that wait, with a snapshot
-   * that sees what they wrote. As one statement, a close reads from before its own wait: its
-   * closing event collides with an append that landed meanwhile, and a child added meanwhile stays
-   * open under a finished root. Resolves to `undefined` when `lock` found nothing.
+   * Takes root locks in a separate statement before running `work` in the same transaction.
+   * Appends take FOR SHARE before sending their INSERT, so a close or reconciliation taking
+   * FOR UPDATE cannot overtake a write whose client timed out. A close reads from a fresh
+   * snapshot after its lock wait, including children and events committed during that wait.
+   * Resolves to `undefined` when `lock` found nothing.
    */
-  async function closing<Row extends QueryResultRow, R>(
+  async function underRootLock<Row extends QueryResultRow, R>(
     lock: string,
     values: unknown[],
-    close: (client: PoolClient, locked: Row[]) => Promise<R>,
+    work: (client: PoolClient, locked: Row[]) => Promise<R>,
   ): Promise<R | undefined> {
     const client = await pool.connect();
     let broken = false;
     try {
       await client.query("BEGIN");
       const { rows } = await client.query<Row>(lock, values);
-      const closed = rows.length > 0 ? await close(client, rows) : undefined;
+      const result = rows.length > 0 ? await work(client, rows) : undefined;
       await client.query("COMMIT");
-      return closed;
+      return result;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => (broken = true));
       throw error;
@@ -587,7 +621,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
 
   /** Ends the dead workers' runs their policy ends: `runId` alone, or up to `limit` of them. */
   async function expire(runId: string | null, limit: number) {
-    const ended = await closing<{ id: string }, { status: "failed" | "cancelled" }[]>(
+    const ended = await underRootLock<{ id: string }, { status: "failed" | "cancelled" }[]>(
       lockExpiredSql,
       [runId, limit],
       async (client, locked) =>
@@ -617,6 +651,65 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
       value,
     ]);
     if (rowCount !== 1) throw lose(tree);
+  }
+
+  /** Reads an unanswered batch behind the root lock, after any in-flight INSERT has committed. */
+  async function reconcileAppend(tree: Tree, node: Node): Promise<boolean> {
+    const batch = node.pending;
+    if (!batch) return false;
+    if (released(tree.controller.signal)) throw tree.controller.signal.reason;
+    const kept = await underRootLock(lockHeldSql, [tree.rootId, tree.token], async (client) => {
+      const { rows } = await client.query<{ seq: number; type: string; data: string | null }>(
+        appendedSql,
+        [node.id, batch.after, batch.after + batch.types.length],
+      );
+      if (rows.length === 0) return false;
+      if (
+        rows.length !== batch.types.length ||
+        rows.some(
+          (row, i) =>
+            row.seq !== batch.after + i + 1 ||
+            row.type !== batch.types[i] ||
+            row.data !== batch.data[i],
+        )
+      )
+        throw new Error(
+          `Events after ${batch.after} of run ${node.id} conflict with this batch. ` +
+            "Check for another writer to the events table; do not replay the batch.",
+        );
+      return true;
+    });
+    if (kept === undefined) throw lose(tree);
+    if (released(tree.controller.signal)) throw tree.controller.signal.reason;
+    if (kept) node.seq = batch.after + batch.types.length;
+    node.pending = undefined;
+    return kept;
+  }
+
+  async function appendBatch(tree: Tree, node: Node, batch: AppendBatch): Promise<void> {
+    await reconcileAppend(tree, node);
+    batch.after = node.seq;
+    const values = [node.id, tree.rootId, tree.token, batch.after, batch.types, batch.data];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (released(tree.controller.signal)) throw tree.controller.signal.reason;
+      node.pending = batch;
+      try {
+        const appended = await underRootLock(lockAppendSql, [tree.rootId, tree.token], (client) =>
+          client.query(appendSql, values),
+        );
+        if (appended?.rowCount !== batch.types.length) throw lose(tree);
+        if (released(tree.controller.signal)) throw tree.controller.signal.reason;
+      } catch (error) {
+        if (await reconcileAppend(tree, node)) return;
+        if (attempt === 1) throw error;
+        // One retry, only after an empty read-back, with the SAME range, payload and fence.
+        // The read-back's root lock proves the prior transaction ended before reusing its range.
+        continue;
+      }
+      node.seq = batch.after + batch.types.length;
+      node.pending = undefined;
+      return;
+    }
   }
 
   function runOf(tree: Tree, node: Node, row: RunRow): Run {
@@ -649,25 +742,47 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
           onError(new Error(`The "${type}" event of run ${node.id} is not JSON`, { cause }));
           return;
         }
-        const seq = ++node.seq;
         node.appends = node.appends
           .then(async () => {
             if (released(signal)) return;
+            await reconcileAppend(tree, node);
+            // Best-effort emit still spends its seq on failure. Allocation happens in the queue,
+            // so it cannot jump ahead of an awaited batch whose size is not yet committed.
+            const after = node.seq++;
             const appended = await pool.query(appendSql, [
               node.id,
               tree.rootId,
               tree.token,
-              seq,
-              type,
-              text,
+              after,
+              [type],
+              [text],
             ]);
             if (appended.rowCount !== 1) lose(tree);
           })
           .catch((cause: unknown) =>
-            onError(
-              new Error(`Event ${seq} ("${type}") of run ${node.id} was not kept`, { cause }),
-            ),
+            onError(new Error(`The "${type}" event of run ${node.id} was not kept`, { cause })),
           );
+      },
+      async append(events) {
+        if (!Array.isArray(events)) throw new TypeError("append takes an array of events.");
+        if (events.length === 0) return;
+        if (node.ended) throw endedError(node);
+        const batch: AppendBatch = { after: 0, types: [], data: [] };
+        // All validation and serialization happens before the first await and before queueing.
+        for (const event of events) {
+          const { type, data } = event ?? {};
+          if (typeof type !== "string" || type.includes("\0"))
+            throw new TypeError("Each appended event needs a string type without null characters.");
+          const text = JSON.stringify(data);
+          if (text === undefined && data !== undefined)
+            throw new TypeError("Event data must serialize to JSON. Omit data when there is none.");
+          batch.types.push(type);
+          batch.data.push(text ?? null);
+        }
+        const appended = node.appends.then(() => appendBatch(tree, node, batch));
+        // The caller receives the rejection, but later writes and finish must still get a turn.
+        node.appends = appended.catch(() => {});
+        return appended;
       },
     };
   }
@@ -697,7 +812,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
     if (tree.drained) return tree.drained;
     if (stopCode(tree.controller.signal) === "lost") return "lost";
     const { status, result, error } = verdict(tree.controller.signal, tree.rootId, kind, outcome);
-    const ended = await closing(
+    const ended = await underRootLock(
       lockHeldSql,
       [tree.rootId, tree.token],
       async (client) =>
@@ -778,6 +893,9 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
       );
       node.ended = true;
       await node.appends;
+      // A child uses its local seq for the closing event. Resolve any unanswered batch first;
+      // the root's close instead reads max(seq) under its lock and can close a failed child too.
+      await reconcileAppend(tree, node);
       // A drain writes the whole tree itself.
       if (released(signal)) throw signal.reason;
       return await endChild<T>(tree, node, verdict(signal, node.id, spec.kind, outcome));
@@ -814,7 +932,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
   async function shutDown(tree: Tree, started: boolean): Promise<DriveOutcome> {
     const values = [tree.rootId, tree.token];
     try {
-      const outcome = await closing(lockHeldSql, values, async (client) => {
+      const outcome = await underRootLock(lockHeldSql, values, async (client) => {
         const ended = (
           await client.query<{ status: "failed" | "cancelled" }>(interruptSql, [...values, started])
         ).rows[0];
@@ -1028,7 +1146,7 @@ export function createRuns(pool: Pick<Pool, "query" | "connect">, options: RunsO
      * had already finished, or does not exist.
      */
     async cancel(runId: string): Promise<boolean> {
-      const cancelled = await closing(lockTreeSql, [runId], async (client) => {
+      const cancelled = await underRootLock(lockTreeSql, [runId], async (client) => {
         if ((await client.query(cancelSql, [runId])).rows.length === 0)
           await client.query(flagCancelSql, [runId]);
         return true;
@@ -1071,7 +1189,7 @@ const INTERRUPTED: Verdict = { status: "failed", result: null, error: { code: "i
 /** A run used after its function returned: a bug in the caller, so it stops nothing else. */
 function endedError(node: Node): Error {
   return new Error(
-    `Run ${node.id} already ended. Call its save, spend, child and emit only while its function runs.`,
+    `Run ${node.id} already ended. Call its save, spend, child, emit and append only while its function runs.`,
   );
 }
 

@@ -13,10 +13,16 @@
  * A doc comment would have been read by whoever was already careful. These make the wrong line
  * unreachable, which is the only fix available to a package that owns both sides of the seam.
  */
-import type { PaginationMeta } from "@gusnips/http";
-import type { Context } from "hono";
+import type { ApiSuccess, PaginationMeta } from "@gusnips/http";
+import type { Context, TypedResponse } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import type { JSONParsed } from "hono/utils/types";
 import { ok as okBody, paginated as paginatedBody } from "../responses.ts";
+
+// Keep Hono's JSON transformation named rather than expanding it into every declaration.
+// Recursive JSON types can exceed the compiler's serialized-type limit without this boundary.
+type JsonAnswer<T, Status extends ContentfulStatusCode> = Response &
+  TypedResponse<JSONParsed<T>, Status, "json">;
 
 /**
  * Use `return ok(c, user)`, or `ok(c, job, 202)` where the route accepted rather than answered.
@@ -36,16 +42,20 @@ export function ok<T, M = PaginationMeta>(
   data: T,
   status: ContentfulStatusCode = 200,
   meta?: M,
-) {
+): JsonAnswer<ApiSuccess<T, M>, ContentfulStatusCode> {
   return c.json(okBody(data, meta).body, status);
 }
 
-export function created<T>(c: Context, data: T) {
+export function created<T>(c: Context, data: T): JsonAnswer<ApiSuccess<T>, ContentfulStatusCode> {
   return ok(c, data, 201);
 }
 
 /** `hasMore` is computed from the rows actually returned. See `paginated` in `../responses.ts`. */
-export function paginated<T>(c: Context, rows: T[], meta: Omit<PaginationMeta, "hasMore">) {
+export function paginated<T>(
+  c: Context,
+  rows: T[],
+  meta: Omit<PaginationMeta, "hasMore">,
+): JsonAnswer<ApiSuccess<T[]>, 200> {
   return c.json(paginatedBody(rows, meta).body, 200);
 }
 

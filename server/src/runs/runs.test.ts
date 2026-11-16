@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Pool } from "pg";
+import { Pool, type QueryResult } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eventually } from "../__tests__/eventually.ts";
 import { hasPostgres, startPostgres } from "../__tests__/postgres-server.ts";
@@ -128,6 +128,19 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
     return { db, held: held.opened, release: released.open };
   }
   const isAppend = (text: string) => text.startsWith("INSERT INTO app.run_events");
+
+  /** Faults wrap real INSERTs; the read-back and the fence still run against Postgres. */
+  function inserts(intercept: (send: () => Promise<QueryResult>) => Promise<QueryResult>) {
+    // pg has eight query overloads; this wrapper forwards the text/values overload runs uses.
+    return {
+      connect: () => pool.connect(),
+      query: (text: string, values?: unknown[]) => {
+        const send = () => pool.query(text, values);
+        return isAppend(text) ? intercept(send) : send();
+      },
+    } as unknown as Pick<Pool, "query" | "connect">;
+  }
+
   const isAddChild = (text: string) =>
     text.startsWith("INSERT INTO app.runs (id, root_id, parent_id");
 
@@ -162,6 +175,406 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
       { seq: 3, type: "step", data: { n: 3 } },
       { seq: 4, type: "end", data: { status: "succeeded", error: null } },
     ]);
+  });
+
+  it("awaits an ordered batch, keeps JSON bytes and replays after a cursor", async () => {
+    const runs = store();
+    const { id } = await runs.create(SPEC);
+    expect(
+      await runs.drive(id, {
+        report: async (run) => {
+          await run.append([
+            { type: "data", data: { zeta: 1, alpha: [2, 3] } },
+            { type: "omitted" },
+            { type: "null", data: null },
+          ]);
+          expect(await eventsOf(id)).toEqual([
+            { seq: 1, type: "data", data: { zeta: 1, alpha: [2, 3] } },
+            { seq: 2, type: "omitted", data: null },
+            { seq: 3, type: "null", data: null },
+          ]);
+        },
+      }),
+    ).toBe("succeeded");
+    const { rows } = await pool.query<{ data: string | null; at: Date }>(
+      "SELECT data::text, at FROM app.run_events WHERE run_id = $1 ORDER BY seq",
+      [id],
+    );
+    expect(rows.map((row) => row.data).slice(0, 3)).toEqual([
+      '{"zeta":1,"alpha":[2,3]}',
+      null,
+      "null",
+    ]);
+    expect(rows.every((row) => row.at instanceof Date)).toBe(true);
+    const after = [];
+    for await (const event of runs.tail(id, 2)) after.push([event.seq, event.type]);
+    expect(after).toEqual([
+      [3, "null"],
+      [4, "end"],
+    ]);
+    expect(errors).toEqual([]);
+  });
+
+  it("serializes concurrent batches with emit and snapshots payloads at the call", async () => {
+    const runs = store();
+    const { id } = await runs.create(SPEC);
+    expect(
+      await runs.drive(id, {
+        report: async (run) => {
+          run.emit("before");
+          const batch = [{ type: "batch", data: { items: [1] } }];
+          const first = run.append(batch);
+          batch[0]!.type = "mutated";
+          batch[0]!.data.items.push(99);
+          batch.push({ type: "added", data: { items: [] } });
+          run.emit("between");
+          const pending = Array.from({ length: 5 }, (_, i) =>
+            run.append([
+              { type: "next", data: i },
+              { type: "pair", data: i },
+            ]),
+          );
+          run.emit("after");
+          await Promise.all([first, ...pending]);
+        },
+      }),
+    ).toBe("succeeded");
+    const events = await eventsOf(id);
+    expect(events.map((event) => event.seq)).toEqual(Array.from({ length: 15 }, (_, i) => i + 1));
+    expect(events[1]).toEqual({ seq: 2, type: "batch", data: { items: [1] } });
+    expect(events.map((event) => event.type)).toEqual([
+      "before",
+      "batch",
+      "between",
+      ...Array<string[]>(5).fill(["next", "pair"]).flat(),
+      "after",
+      "end",
+    ]);
+    expect(events.slice(3, 13).map((event) => event.data)).toEqual([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
+  });
+
+  it("does no writes for empty or invalid batches and keeps the queue usable", async () => {
+    let writes = 0;
+    const runs = store(
+      {},
+      inserts((send) => {
+        writes++;
+        return send();
+      }),
+    );
+    const { id } = await runs.create(SPEC);
+    expect(
+      await runs.drive(id, {
+        report: async (run) => {
+          await run.append([]);
+          const cycle: Record<string, unknown> = {};
+          cycle.self = cycle;
+          const invalid: unknown[] = [null, {}, [null], [{}], [{ type: 1 }], new Array(1)];
+          for (const batch of invalid) {
+            // @ts-expect-error Invalid runtime callers must fail before writing any event.
+            await expect(run.append(batch)).rejects.toBeInstanceOf(TypeError);
+          }
+          for (const data of [cycle, 1n, Symbol("not JSON"), () => 1, { toJSON: () => undefined }])
+            await expect(
+              run.append([{ type: "valid" }, { type: "invalid", data }]),
+            ).rejects.toThrow();
+          await expect(run.append([{ type: "bad\0type" }])).rejects.toThrow("null characters");
+          expect(writes).toBe(0);
+          expect(await eventsOf(id)).toEqual([]);
+          await run.append([{ type: "valid" }]);
+        },
+      }),
+    ).toBe("succeeded");
+    expect((await eventsOf(id)).map((event) => event.seq)).toEqual([1, 2]);
+    expect(errors).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "does not close before a queued append settles (child: %s)",
+    async (child) => {
+      const reached = gate();
+      const release = gate();
+      const db = inserts(async (send) => {
+        reached.open();
+        await release.opened;
+        return send();
+      });
+      const runs = store({}, db);
+      const { id } = await runs.create(SPEC);
+      let pending: Promise<void> | undefined;
+      let target = id;
+      const work = async (run: Run) => {
+        target = run.id;
+        pending = run.append([{ type: "a" }, { type: "b" }]);
+        return "done";
+      };
+      const driving = runs.drive(id, {
+        report: (run) => (child ? run.child("c", { kind: "work", input: null }, work) : work(run)),
+      });
+      await reached.opened;
+      // The INSERT has not reached Postgres, so only the append queue can hold the close back.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(await rowOf(target)).toMatchObject({ status: "running" });
+      release.open();
+      expect(await driving).toBe("succeeded");
+      await pending;
+      expect((await eventsOf(target)).map((event) => event.type)).toEqual(["a", "b", "end"]);
+    },
+  );
+
+  it.each([false, true])("rejects a stale worker's append (child: %s)", async (child) => {
+    const runs = store();
+    const { id } = await runs.create({ ...SPEC, restart: "resume" });
+    const started = gate();
+    const late = gate();
+    let rejected: unknown;
+    let signal: AbortSignal | undefined;
+    const work = async (run: Run) => {
+      signal = run.signal;
+      started.open();
+      await late.opened;
+      rejected = await run.append([{ type: "late" }]).catch((error: unknown) => error);
+      await expect(run.append([{ type: "later" }])).rejects.toMatchObject({ code: "lost" });
+    };
+    const first = runs.drive(id, {
+      report: (run) => (child ? run.child("c", { kind: "work", input: null }, work) : work(run)),
+    });
+    await started.opened;
+    await expireLease(id);
+    expect(
+      await store().drive(id, { report: async (run) => run.append([{ type: "current" }]) }),
+    ).toBe("succeeded");
+    late.open();
+    expect(await first).toBe("lost");
+    expect(rejected).toBeInstanceOf(RunStopped);
+    expect(signal?.reason).toMatchObject({ code: "lost" });
+    expect(
+      (await pool.query("SELECT 1 FROM app.run_events WHERE type IN ('late', 'later')")).rows,
+    ).toEqual([]);
+  });
+
+  it("reports an atomic batch failure, retries once and lets later events finish", async () => {
+    await pool.query(
+      "ALTER TABLE app.run_events ADD CONSTRAINT refuse_test CHECK (type <> 'refused')",
+    );
+    let attempts = 0;
+    const runs = store(
+      {},
+      inserts((send) => {
+        attempts++;
+        return send();
+      }),
+    );
+    const { id } = await runs.create(SPEC);
+    try {
+      expect(
+        await runs.drive(id, {
+          report: async (run) => {
+            await expect(
+              run.append([{ type: "would-write" }, { type: "refused" }]),
+            ).rejects.toMatchObject({ code: "23514" });
+            expect(attempts).toBe(2);
+            expect(await eventsOf(id)).toEqual([]);
+            expect(errors).toEqual([]); // append reports to its caller, not only onError.
+            run.emit("refused"); // Best-effort emit still spends a sequence on failure.
+            await run.append([{ type: "kept" }]);
+          },
+        }),
+      ).toBe("succeeded");
+      expect(await eventsOf(id)).toEqual([
+        { seq: 2, type: "kept", data: null },
+        { seq: 3, type: "end", data: { status: "succeeded", error: null } },
+      ]);
+      expect(errors).toHaveLength(1);
+    } finally {
+      await pool.query("ALTER TABLE app.run_events DROP CONSTRAINT refuse_test");
+    }
+  });
+
+  it("reconciles a committed INSERT whose answer was lost without writing it twice", async () => {
+    let writes = 0;
+    const runs = store(
+      {},
+      inserts(async (send) => {
+        const result = await send();
+        if (++writes === 1) throw new Error("connection lost after commit");
+        return result;
+      }),
+    );
+    const { id } = await runs.create(SPEC);
+    expect(
+      await runs.drive(id, {
+        report: async (run) => {
+          await run.append([{ type: "first", data: { z: 1, a: 2 } }, { type: "second" }]);
+          expect(writes).toBe(1);
+          run.emit("third");
+          await run.append([{ type: "fourth" }]);
+        },
+      }),
+    ).toBe("succeeded");
+    expect((await eventsOf(id)).map((event) => `${event.seq} ${event.type}`)).toEqual([
+      "1 first",
+      "2 second",
+      "3 third",
+      "4 fourth",
+      "5 end",
+    ]);
+    expect(errors).toEqual([]);
+  });
+
+  it("retries an uncommitted INSERT once at the same sequence", async () => {
+    let writes = 0;
+    const runs = store(
+      {},
+      inserts((send) => {
+        if (++writes === 1) return Promise.reject(new Error("connection lost before insert"));
+        return send();
+      }),
+    );
+    const { id } = await runs.create(SPEC);
+    expect(await runs.drive(id, { report: (run) => run.append([{ type: "kept" }]) })).toBe(
+      "succeeded",
+    );
+    expect(writes).toBe(2);
+    expect((await eventsOf(id)).map((event) => `${event.seq} ${event.type}`)).toEqual([
+      "1 kept",
+      "2 end",
+    ]);
+  });
+
+  it.each([
+    [2, "other", '{"z":1,"a":2}', { z: 1, a: 2 }],
+    [1, "intended", '{"a":2,"z":1}', { z: 1, a: 2 }],
+    [1, "intended", "null", undefined],
+  ])(
+    "refuses a conflicting range without a partial batch (%s, %s, %s)",
+    async (seq, type, text, data) => {
+      let writes = 0;
+      const runs = store(
+        {},
+        inserts((send) => {
+          writes++;
+          return send();
+        }),
+      );
+      const { id } = await runs.create(SPEC);
+      expect(
+        await runs.drive(id, {
+          report: async (run) => {
+            await pool.query(
+              "INSERT INTO app.run_events (run_id, seq, type, data) VALUES ($1, $2, $3, $4::json)",
+              [id, seq, type, text],
+            );
+            await expect(
+              run.append([{ type: "intended", data }, { type: "last" }]),
+            ).rejects.toThrow("conflict with this batch");
+            expect(writes).toBe(1);
+            expect(await eventsOf(id)).toHaveLength(1);
+            await expect(run.append([{ type: "later" }])).rejects.toThrow(
+              "conflict with this batch",
+            );
+          },
+        }),
+      ).toBe("succeeded");
+      expect((await eventsOf(id)).map((event) => event.type)).toEqual([type, "end"]);
+    },
+  );
+
+  it.each([false, true])(
+    "resolves an unknown range before later writes or child cleanup (%s)",
+    async (child) => {
+      let writes = 0;
+      const runs = store(
+        {},
+        inserts(async (send) => {
+          const result = await send();
+          if (++writes === 1) {
+            await pool.query("ALTER TABLE app.run_events RENAME TO unavailable_events");
+            throw new Error("connection lost after insert");
+          }
+          return result;
+        }),
+      );
+      const { id } = await runs.create(SPEC);
+      let target = id;
+      const work = async (run: Run) => {
+        target = run.id;
+        try {
+          await expect(run.append([{ type: "kept" }])).rejects.toMatchObject({ code: "42P01" });
+        } finally {
+          await pool.query("ALTER TABLE app.unavailable_events RENAME TO run_events");
+        }
+        if (!child) {
+          run.emit("next");
+          await run.append([{ type: "last" }]);
+        }
+      };
+      expect(
+        await runs.drive(id, {
+          report: (run) =>
+            child ? run.child("c", { kind: "work", input: null }, work) : work(run),
+        }),
+      ).toBe("succeeded");
+      expect((await eventsOf(target)).map((event) => `${event.seq} ${event.type}`)).toEqual(
+        child ? ["1 kept", "2 end"] : ["1 kept", "2 next", "3 last", "4 end"],
+      );
+    },
+  );
+
+  it("rejects lease loss even when the uncertain batch is already stored", async () => {
+    let writes = 0;
+    let id = "";
+    const runs = store(
+      {},
+      inserts(async (send) => {
+        await send();
+        writes++;
+        await expireLease(id);
+        await store().drive(id, { report: async () => "new worker" });
+        throw new Error("lost answer");
+      }),
+    );
+    ({ id } = await runs.create({ ...SPEC, restart: "resume" }));
+    let rejected: unknown;
+    expect(
+      await runs.drive(id, {
+        report: async (run) => {
+          rejected = await run.append([{ type: "kept" }]).catch((error: unknown) => error);
+        },
+      }),
+    ).toBe("lost");
+    expect(rejected).toBeInstanceOf(RunStopped);
+    expect(rejected).toMatchObject({ code: "lost" });
+    expect(writes).toBe(1);
+    expect((await eventsOf(id)).map((event) => event.type)).toEqual(["kept", "end"]);
+  });
+
+  it("rejects an append answered after the worker's lease deadline", async () => {
+    const stopped = gate();
+    // pg's overloaded query type also covers callbacks; this wrapper uses only text and values.
+    const db = {
+      connect: () => pool.connect(),
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("RETURNING cancel_requested_at")) return new Promise<never>(() => {});
+        const result = await pool.query(text, values);
+        if (isAppend(text)) await stopped.opened;
+        return result;
+      },
+    } as unknown as Pick<Pool, "query" | "connect">;
+    const runs = store({ leaseSecs: 1 }, db);
+    const { id } = await runs.create({ ...SPEC, restart: "resume" });
+    let rejected: unknown;
+    expect(
+      await runs.drive(id, {
+        report: async (run) => {
+          run.signal.addEventListener("abort", stopped.open, { once: true });
+          rejected = await run.append([{ type: "kept" }]).catch((error: unknown) => error);
+        },
+      }),
+    ).toBe("lost");
+    expect(rejected).toBeInstanceOf(RunStopped);
+    expect(rejected).toMatchObject({ code: "lost" });
+    expect(await eventsOf(id)).toEqual([{ seq: 1, type: "kept", data: null }]);
   });
 
   it("lets exactly one of ten workers claim a run", async () => {
@@ -1007,6 +1420,7 @@ describe.skipIf(!hasPostgres)("createRuns against a real Postgres", () => {
         late = await Promise.all([
           leaked?.spend(0.01).catch((error: unknown) => error),
           leaked?.save({}).catch((error: unknown) => error),
+          leaked?.append([{ type: "late" }]).catch((error: unknown) => error),
           leaked?.child("b", { kind: "search", input: null }, async () => 2).catch((e) => e),
         ]);
         leaked?.emit("late", {});

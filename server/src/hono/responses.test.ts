@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { created, noContent, ok, paginated } from "./responses.ts";
 
 /**
@@ -19,6 +19,16 @@ const app = new Hono()
   .delete("/gone", (c) => noContent(c));
 
 describe("the Hono success adapters", () => {
+  it("retains JSON-transformed data and custom metadata in its public return type", () => {
+    type Reply = ReturnType<typeof ok<{ createdAt: Date }, { cache: boolean }>>;
+    expectTypeOf<Reply["_data"]>().toEqualTypeOf<{
+      data: { createdAt: string };
+      meta?: { cache: boolean };
+    }>();
+    expectTypeOf<Reply>().toExtend<Response>();
+    expectTypeOf<ReturnType<typeof paginated<number>>["_status"]>().toEqualTypeOf<200>();
+  });
+
   it("answers the envelope itself, never the { status, body } wrapper around it", async () => {
     const res = await app.request("/ok");
     expect(res.status).toBe(200);

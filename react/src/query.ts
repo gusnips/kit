@@ -120,7 +120,11 @@ export function queryDefaults({
     },
     // A mutation is not idempotent by default. Retrying one that already reached the server is
     // how a customer gets charged twice; all three donors agreed on this without discussion.
-    mutations: { retry: false },
+    // And a write pressed offline fails at once instead of waiting for the connection. React
+    // Query's own mode ("online") holds it, then sends it by itself when the browser or NetInfo
+    // says online again, even after its screen is gone. Two adopters set "always" by hand after
+    // finding that, one on eight mutations one at a time, and missed the ones that spend.
+    mutations: { retry: false, networkMode: "always" },
   };
 }
 

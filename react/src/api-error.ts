@@ -31,6 +31,17 @@ export class ApiError extends Error {
   readonly retryAfterSecs: number | undefined;
 
   /**
+   * Whether the answer brought a message of its own. False when `message` is only this class's
+   * `Request failed (N)`: a gateway's HTML page, an empty body, an envelope without a message.
+   *
+   * A screen that shows `message` checks this first, because that fallback is English and written
+   * for a log. `code` cannot answer it: an API also writes code-less refusals for people ("Mensagem
+   * vazia"), so "no code" is not "no message". The second migration's three apps each compared
+   * `message` against the fallback string by hand until this existed.
+   */
+  readonly hasMessage: boolean;
+
+  /**
    * The client raised this itself to stop a caller while it was already handling the situation.
    * Today this is the 401 thrown after a dead session, where the person is already on their way to
    * the sign-in page.
@@ -51,7 +62,8 @@ export class ApiError extends Error {
       retryAfterSecs?: number;
     } = {},
   ) {
-    super(opts.message ?? body?.message ?? `Request failed (${status})`);
+    const given = opts.message ?? body?.message;
+    super(given ?? `Request failed (${status})`);
     this.name = "ApiError";
     this.status = status;
     this.code = body?.code;
@@ -61,6 +73,8 @@ export class ApiError extends Error {
     this.requestId = opts.requestId;
     this.retryAfterSecs = opts.retryAfterSecs;
     this.expected = opts.expected ?? false;
+    // An empty string is no message either: auth errors arrive with `message: ""`.
+    this.hasMessage = Boolean(given);
   }
 }
 

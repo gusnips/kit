@@ -15,6 +15,10 @@ That is the whole call. `user` is a `User`: not a `Response`, not `res.json()`, 
 check. The client attached the token, unwrapped the envelope, and threw a typed `ApiError`
 carrying the code and the request id if the server refused.
 
+When the refusal brought no sentence of its own (a gateway's HTML page, an empty body),
+`error.message` is the client's `Request failed (502)`, written for a log, and `error.hasMessage`
+is `false`. Check it before you put `message` on a screen.
+
 You build `api` once, wherever you keep that sort of thing:
 
 ```ts

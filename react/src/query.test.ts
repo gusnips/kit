@@ -1,7 +1,13 @@
-import { QueryClient, QueryObserver, type QueryObserverResult } from "@tanstack/react-query";
+import {
+  MutationObserver,
+  onlineManager,
+  QueryClient,
+  QueryObserver,
+  type QueryObserverResult,
+} from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api-error.ts";
-import { queryView, retryDelayMs, shouldRetry } from "./query.ts";
+import { queryDefaults, queryView, retryDelayMs, shouldRetry } from "./query.ts";
 
 const refusal = (status: number, code?: string) =>
   new ApiError(status, code ? { code, message: code } : null);
@@ -132,6 +138,24 @@ describe("shouldRetry", () => {
 
   it("still retries when nothing said how long", () => {
     expect(shouldRetry(refusal(429))).toBe(true);
+  });
+});
+
+describe("queryDefaults", () => {
+  afterEach(() => onlineManager.setOnline(true));
+
+  // React Query's own mode holds a write pressed offline and sends it by itself once the
+  // connection is back, even after its screen is gone. With the default, it fails where the
+  // person pressed it. Broken, the mutation pauses and this test times out.
+  it("sends a write pressed offline at once instead of holding it for later", async () => {
+    onlineManager.setOnline(false);
+    const client = new QueryClient({ defaultOptions: queryDefaults() });
+    const mutationFn = vi.fn(() => Promise.reject(new TypeError("Failed to fetch")));
+
+    await expect(new MutationObserver(client, { mutationFn }).mutate()).rejects.toThrow(
+      "Failed to fetch",
+    );
+    expect(mutationFn).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -317,6 +317,11 @@ an answer, and a second attempt just says it again. The rule itself is
 [`@gusnips/http/retry`](../http#should-this-request-be-tried-again), so an SDK with no React in it
 can retry the same way.
 
+Writes are never retried, and a write pressed offline fails at once (`networkMode: "always"`).
+React Query's own mode would hold it and send it by itself when the connection comes back, even
+after the screen that sent it is gone. So the person sees the error where they pressed, and
+nothing runs later with nobody looking.
+
 `durableLimitCodes` is the part a status code cannot tell you. A spent monthly quota and a burst
 limit both arrive as 429, but one clears by waiting and the other clears by buying. Retrying the
 second burns another request against the limiter to hear the same thing three times, so you name

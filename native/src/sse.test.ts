@@ -192,4 +192,24 @@ describe("openSseStream", () => {
     await settle();
     expect(FakeXhr.opened).toHaveLength(0);
   });
+
+  it("aborts and reports the thrown error when onResponse refuses a 2xx response", async () => {
+    const refused = new Error("not an event stream");
+    const { frames, onError, onClose } = open({
+      onResponse: ({ contentType }) => {
+        if (!contentType?.startsWith("text/event-stream")) throw refused;
+      },
+    });
+    await settle();
+    const xhr = FakeXhr.opened[0]!;
+    xhr.responseHeaders = { "content-type": "text/html" };
+    xhr.arrive("data: ignored\n\n");
+    xhr.onload?.();
+    xhr.onerror?.();
+    expect(xhr.aborted).toBe(true);
+    expect(frames).toEqual([]);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(refused);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });

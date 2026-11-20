@@ -39,6 +39,12 @@ export interface SseStreamOptions {
   session?: SessionAdapter;
   /** Extra headers, computed when the request opens, like the API client's `headers`. */
   headers?: () => Record<string, string>;
+  /**
+   * Called once response headers arrive for a 2xx response, before any body bytes are fed to the
+   * frame parser. Throw to refuse the response (for example when `content-type` is not
+   * `text/event-stream`): the XHR aborts and `onError` receives what was thrown.
+   */
+  onResponse?: (response: { status: number; contentType: string | null }) => void;
   /** One frame off the wire. `data` is raw text: parse it the way your server writes it. */
   onFrame: (frame: SseFrame) => void;
   /**
@@ -75,7 +81,17 @@ const REQUEST_ID_HEADER = "x-request-id";
  * stream. A chat turn is fine. A feed left open all day is not; that needs a native streaming module.
  */
 export function openSseStream(options: SseStreamOptions): SseStream {
-  const { url, method = "POST", body, session, headers, onFrame, onError, onClose } = options;
+  const {
+    url,
+    method = "POST",
+    body,
+    session,
+    headers,
+    onResponse,
+    onFrame,
+    onError,
+    onClose,
+  } = options;
   let aborted = false;
   let refreshed = false;
   let current: XMLHttpRequest | null = null;
@@ -93,6 +109,7 @@ export function openSseStream(options: SseStreamOptions): SseStream {
     const xhr = new XMLHttpRequest();
     current = xhr;
     let read = 0;
+    let responseState: "pending" | "ok" | "refused" = "pending";
     const parser = createSseParser((frame) => {
       if (!aborted) onFrame(frame);
     });
@@ -104,10 +121,31 @@ export function openSseStream(options: SseStreamOptions): SseStream {
       xhr.setRequestHeader(name, value);
     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
+    // Run `onResponse` once on the first 2xx callback (progress or load), before feeding any bytes
+    // into the SSE parser. A throw refuses the stream immediately and aborts the socket.
+    const checkResponse = (): boolean => {
+      if (responseState !== "pending") return responseState === "ok";
+      if (xhr.status < 200 || xhr.status >= 300) return true;
+      responseState = "ok";
+      if (!onResponse) return true;
+      try {
+        onResponse({
+          status: xhr.status,
+          contentType: xhr.getResponseHeader("content-type"),
+        });
+        return !aborted;
+      } catch (thrown) {
+        responseState = "refused";
+        xhr.abort();
+        fail(asError(thrown, "The stream response was refused"));
+        return false;
+      }
+    };
+
     // `responseText` is everything so far, not the new part. Feed only what was not fed yet, or
     // every frame is delivered again on every progress event.
     const drain = () => {
-      if (aborted || xhr.responseText.length <= read) return;
+      if (aborted || !checkResponse() || xhr.responseText.length <= read) return;
       const next = xhr.responseText.slice(read);
       read = xhr.responseText.length;
       parser.feed(next);
@@ -115,7 +153,7 @@ export function openSseStream(options: SseStreamOptions): SseStream {
     xhr.onprogress = drain;
 
     xhr.onload = () => {
-      if (aborted) return;
+      if (aborted || responseState === "refused") return;
       if (xhr.status === 401 && session && !refreshed) {
         refreshed = true;
         const refused = refusalOf(xhr);
@@ -132,14 +170,19 @@ export function openSseStream(options: SseStreamOptions): SseStream {
         fail(refusalOf(xhr));
         return;
       }
+      if (!checkResponse()) return;
       // A last frame the server closed without its blank line. Two newlines close it whether the
       // stream ended mid-frame or after one newline; after a complete frame they add nothing.
       drain();
       parser.feed("\n\n");
       onClose?.();
     };
-    xhr.onerror = () => fail(new Error("The stream lost its connection"));
-    xhr.ontimeout = () => fail(new Error("The stream timed out"));
+    xhr.onerror = () => {
+      if (responseState !== "refused") fail(new Error("The stream lost its connection"));
+    };
+    xhr.ontimeout = () => {
+      if (responseState !== "refused") fail(new Error("The stream timed out"));
+    };
 
     xhr.send(method === "GET" ? null : JSON.stringify(body ?? {}));
   }

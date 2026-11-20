@@ -11,7 +11,7 @@ class FakeXhr {
   url = "";
   status = 200;
   responseText = "";
-  responseHeaders: Record<string, string> = {};
+  responseHeaders: Record<string, string> = { "content-type": "text/event-stream" };
   requestHeaders: Record<string, string> = {};
   sent: string | null | undefined;
   aborted = false;
@@ -29,7 +29,11 @@ class FakeXhr {
     this.requestHeaders[name] = existing ? `${existing}, ${value}` : value;
   }
   getResponseHeader(name: string) {
-    return this.responseHeaders[name] ?? null;
+    const lower = name.toLowerCase();
+    for (const [key, value] of Object.entries(this.responseHeaders)) {
+      if (key.toLowerCase() === lower) return value;
+    }
+    return null;
   }
   send(body: string | null) {
     this.sent = body;
@@ -423,5 +427,119 @@ describe("createProviderkitAdapter", () => {
         { onData: () => {}, onError: () => {}, onClose: () => {} },
       ),
     ).toThrow(RangeError);
+  });
+
+  it("treats empty or non-JSON 2xx command receipts as accepted instead of network errors", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response("", { status: 200, headers: { "content-type": "application/json" } }),
+      )
+      .mockResolvedValueOnce(
+        new Response("not-json", {
+          status: 202,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const session = sessionWith("new");
+    const client = createApiClient({
+      baseUrl: "https://api.test/v1",
+      session,
+      onSessionDead: vi.fn(),
+    });
+    const adapter = createProviderkitAdapter({
+      baseUrl: "https://api.test/v1",
+      client,
+      session,
+    });
+
+    const req = {
+      url: "/chat/send",
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: { clientId: "c1", text: "hi" },
+    };
+
+    await expect(adapter.command(req, {})).resolves.toBeUndefined();
+    await expect(adapter.command(req, {})).resolves.toBeUndefined();
+  });
+
+  it("refuses 2xx observe responses whose content-type is not text/event-stream, while allowing 204", async () => {
+    const session = sessionWith("new");
+    const client = createApiClient({
+      baseUrl: "https://api.test/v1",
+      session,
+      onSessionDead: vi.fn(),
+    });
+    const adapter = createProviderkitAdapter({
+      baseUrl: "https://api.test/v1",
+      client,
+      session,
+    });
+
+    const htmlErrors: unknown[] = [];
+    const htmlFrames: string[] = [];
+    const htmlClose = vi.fn();
+    adapter.open(
+      { url: "/chat/events", method: "GET", headers: { accept: "text/event-stream" } },
+      {
+        onData: (data) => htmlFrames.push(data),
+        onError: (error) => htmlErrors.push(error),
+        onClose: htmlClose,
+      },
+    );
+    await settle();
+    const htmlXhr = FakeXhr.opened[0]!;
+    htmlXhr.responseHeaders = { "content-type": "text/html; charset=utf-8" };
+    htmlXhr.arrive("<html><body>Proxy page</body></html>");
+    htmlXhr.onload?.();
+
+    expect(htmlXhr.aborted).toBe(true);
+    expect(htmlFrames).toEqual([]);
+    expect(htmlErrors).toHaveLength(1);
+    expect(htmlErrors[0]).toBeInstanceOf(TransportError);
+    expect(htmlErrors[0]).toMatchObject({
+      outcome: "refused",
+      error: { code: "not_event_stream" },
+    });
+    expect(htmlClose).toHaveBeenCalledOnce();
+
+    const jsonErrors: unknown[] = [];
+    adapter.open(
+      { url: "/chat/events", method: "GET", headers: { accept: "text/event-stream" } },
+      { onData: () => {}, onError: (error) => jsonErrors.push(error), onClose: () => {} },
+    );
+    await settle();
+    const jsonXhr = FakeXhr.opened[1]!;
+    jsonXhr.responseHeaders = { "content-type": "application/json" };
+    jsonXhr.onload?.();
+
+    expect(jsonXhr.aborted).toBe(true);
+    expect(jsonErrors[0]).toBeInstanceOf(TransportError);
+    expect(jsonErrors[0]).toMatchObject({
+      outcome: "refused",
+      error: { code: "not_event_stream" },
+    });
+
+    const noContentErrors: unknown[] = [];
+    const noContentClose = vi.fn();
+    adapter.open(
+      { url: "/chat/events", method: "GET", headers: { accept: "text/event-stream" } },
+      {
+        onData: () => {},
+        onError: (error) => noContentErrors.push(error),
+        onClose: noContentClose,
+      },
+    );
+    await settle();
+    const noContentXhr = FakeXhr.opened[2]!;
+    noContentXhr.status = 204;
+    noContentXhr.responseHeaders = {};
+    noContentXhr.onload?.();
+
+    expect(noContentErrors).toEqual([]);
+    expect(noContentClose).toHaveBeenCalledOnce();
   });
 });

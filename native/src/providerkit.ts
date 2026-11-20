@@ -92,6 +92,19 @@ const NETWORK_ERROR: DisplayError = Object.freeze({
   message: "Could not reach the server. Check your connection and try again.",
 });
 
+// Deterministic wrong content type (such as an HTML error page from a proxy or a JSON response
+// from a misrouted endpoint), matching `@providerkit/react/sse`. Retrying would fail the same way.
+const NOT_A_STREAM: DisplayError = Object.freeze({
+  code: "not_event_stream",
+  message: "The server did not answer with an event stream.",
+});
+
+const EVENT_STREAM = "text/event-stream";
+
+function isEventStream(contentType: string | null): boolean {
+  return contentType?.trim().toLowerCase().startsWith(EVENT_STREAM) === true;
+}
+
 function normalizeError(error: unknown): TransportError {
   if (error instanceof TransportError) return error;
   if (error instanceof ApiError) return toTransportError(error);
@@ -153,6 +166,10 @@ export function createProviderkitAdapter(
       body: request.body,
       session,
       headers: () => streamHeaders(extraHeaders?.(), request.headers, method),
+      onResponse: ({ status, contentType }) => {
+        if (status === 204) return;
+        if (!isEventStream(contentType)) throw new TransportError("refused", NOT_A_STREAM);
+      },
       onFrame: (frame) => handlers.onData(frame.data),
       onError: (error) => handlers.onError(normalizeError(error)),
       onClose: () => handlers.onClose(),
@@ -161,19 +178,26 @@ export function createProviderkitAdapter(
 
   const command: SendCommand = async (request, { signal }) => {
     const path = clientPath(base, request.url);
+    let response: Response;
     try {
-      const response = await client.request(path, {
+      response = await client.request(path, {
         method: request.method,
         headers: request.headers,
         ...(request.body !== undefined && { body: JSON.stringify(request.body) }),
         ...(signal && { signal }),
       });
-      if (response.status === 204) return undefined;
-      if (!response.headers.get("content-type")?.toLowerCase().includes("json")) return undefined;
-      return await response.json();
     } catch (error) {
       if (signal?.aborted) throw error;
       throw normalizeError(error);
+    }
+    if (response.status === 204) return undefined;
+    if (!response.headers.get("content-type")?.toLowerCase().includes("json")) return undefined;
+    // The server already accepted the command with 2xx; an empty or unparseable receipt body must
+    // not turn an accepted write into a fake network error.
+    try {
+      return await response.json();
+    } catch {
+      return undefined;
     }
   };
 

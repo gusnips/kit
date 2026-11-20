@@ -10,8 +10,9 @@
 //   @gusnips/native/query     installQueryManagers     → @tanstack/react-query, netinfo
 //   @gusnips/native/i18n      createNativeLanguage     → react-native-localize, async-storage
 //   @gusnips/native/supabase  supabaseAuthStorage      → async-storage, @supabase/supabase-js
-//   @gusnips/native/turnstile useTurnstile             → react-native-webview
-//   @gusnips/native/metro     nativeMetroConfig        → Node, at bundle time
+//   @gusnips/native/turnstile   useTurnstile             → react-native-webview
+//   @gusnips/native/providerkit createProviderkitAdapter → @providerkit/react, @providerkit/native
+//   @gusnips/native/metro       nativeMetroConfig        → Node, at bundle time
 //   @gusnips/native/css       buildNativeCss           → Node, tailwindcss, react-native-css
 //
 // What is left here needs only the required peers.

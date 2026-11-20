@@ -22,18 +22,19 @@ meet at launch.
 
 ## What is in it
 
-| Import                        | What it does                                                             | Also needs                                            |
-| ----------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------- |
-| `@gusnips/native`             | `openSseStream`: server-sent events over XHR                             | nothing more                                          |
-| `@gusnips/native/theme`       | `createNativeTheme`, `useThemeColors`: light, dark or system, remembered | `@react-native-async-storage/async-storage`           |
-| `@gusnips/native/network`     | `useIsOffline`, `isDeviceOffline`                                        | `@react-native-community/netinfo`                     |
-| `@gusnips/native/query`       | `installQueryManagers`: React Query on app focus and network             | `@tanstack/react-query`, netinfo                      |
-| `@gusnips/native/i18n`        | `createNativeLanguage`: the phone's language, or the saved one           | `react-native-localize`, async-storage, `i18next`     |
-| `@gusnips/native/supabase`    | `supabaseAuthStorage`: where supabase-js keeps the session               | async-storage, `@supabase/supabase-js`                |
-| `@gusnips/native/turnstile`   | `useTurnstile`: a security check for sign-in and other human forms       | `react-native-webview`                                |
-| `@gusnips/native/metro`       | `nativeMetroConfig`, for `metro.config.js`                               | nothing more                                          |
-| `@gusnips/native/css`         | `buildNativeCss` and the `gusnips-native-css` command                    | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
-| `gusnips-native-hermes-check` | compiles the production bundle with Hermes, without Xcode                | `hermes-compiler`                                     |
+| Import                        | What it does                                                               | Also needs                                            |
+| ----------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `@gusnips/native`             | `openSseStream`: server-sent events over XHR                               | nothing more                                          |
+| `@gusnips/native/theme`       | `createNativeTheme`, `useThemeColors`: light, dark or system, remembered   | `@react-native-async-storage/async-storage`           |
+| `@gusnips/native/network`     | `useIsOffline`, `isDeviceOffline`                                          | `@react-native-community/netinfo`                     |
+| `@gusnips/native/query`       | `installQueryManagers`: React Query on app focus and network               | `@tanstack/react-query`, netinfo                      |
+| `@gusnips/native/i18n`        | `createNativeLanguage`: the phone's language, or the saved one             | `react-native-localize`, async-storage, `i18next`     |
+| `@gusnips/native/supabase`    | `supabaseAuthStorage`: where supabase-js keeps the session                 | async-storage, `@supabase/supabase-js`                |
+| `@gusnips/native/turnstile`   | `useTurnstile`: a security check for sign-in and other human forms         | `react-native-webview`                                |
+| `@gusnips/native/providerkit` | `createProviderkitAdapter`: `open` and `command` for `@providerkit/native` | `@providerkit/react`, `@providerkit/native`           |
+| `@gusnips/native/metro`       | `nativeMetroConfig`, for `metro.config.js`                                 | nothing more                                          |
+| `@gusnips/native/css`         | `buildNativeCss` and the `gusnips-native-css` command                      | `@tailwindcss/cli`, `tailwindcss`, `react-native-css` |
+| `gusnips-native-hermes-check` | compiles the production bundle with Hermes, without Xcode                  | `hermes-compiler`                                     |
 
 Every app needs `react`, `react-native`, `@gusnips/react` and `@gusnips/http`. The rest are
 optional: you install one only when you import the line that uses it. Most of them carry native
@@ -274,6 +275,36 @@ stream.abort(); // when the screen closes
 - No reconnect. Reopen the stream from where your screen knows how to recover.
 - The whole response stays in memory until the stream ends. Fine for a chat answer; not for a feed
   left open all day.
+
+### With `@providerkit/native`
+
+`@providerkit/native`'s `createSseTransport` asks for an `open` function for streams and a
+`command` function for sends, answers and stops. `createProviderkitAdapter` wraps `openSseStream`
+and your `ApiClient` so both keep sharing the same single-flight 401 refresh:
+
+```ts
+import { createSseTransport } from "@providerkit/native";
+import { createProviderkitAdapter } from "@gusnips/native/providerkit";
+
+const adapter = createProviderkitAdapter({
+  baseUrl: API_URL,
+  client: api,
+  session, // the same SessionAdapter your createApiClient uses
+});
+
+export const transport = createSseTransport({
+  observe: (cursor) => (cursor ? `/chat/events?after=${cursor.seq}` : "/chat/events"),
+  send: () => "/chat/send",
+  respond: () => "/chat/respond",
+  stop: () => "/chat/stop",
+  ...adapter,
+});
+```
+
+`ApiError` refusals (4xx) become `TransportError("refused", ...)` with the server's `code` intact,
+so `@providerkit/react` takes the command back instead of treating it as an unknown outcome. 5xx
+and network errors become `TransportError("unknown", ...)`. Install `@providerkit/react` and
+`@providerkit/native` only when you import this subpath.
 
 ## React Query
 

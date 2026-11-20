@@ -76,6 +76,8 @@
       "devDependencies": {
         "@gusnips/http": ">=0.2.0 <1",
         "@gusnips/react": ">=0.11.1 <1",
+        "@providerkit/native": "^0.1.0",
+        "@providerkit/react": "^0.2.0",
         "@react-native-async-storage/async-storage": "^3.1.1",
         "@react-native-community/netinfo": "^12.0.1",
         "@supabase/supabase-js": "^2.113.0",
@@ -599,6 +601,10 @@
     "@parcel/watcher-win32-arm64": ["@parcel/watcher-win32-arm64@2.6.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-gIZAP23jaHjGWasY/TY6yL7NHFClf0Ga7FN+iINvk+KN94rhm94lYZhFsbYFNcA04/onvGD9kKmiJLJB2HbNwQ=="],
 
     "@parcel/watcher-win32-x64": ["@parcel/watcher-win32-x64@2.6.0", "", { "os": "win32", "cpu": "x64" }, "sha512-cA+/pXV2YkfxlIcXOQ5fSWqAzzPyD78/x5qbK/I0vUkrlYHA8TIz+MXjAbGouguKVSI4bOmkTSJ1/poVSsgt+A=="],
+
+    "@providerkit/native": ["@providerkit/native@0.1.0", "", { "peerDependencies": { "@providerkit/react": "^0.2.0", "react": "^19", "react-native": ">=0.86" } }, "sha512-qFmqbudGUYx4ytdddwXIdcZF57tlivhZU8YUpfo+al6Bets3xFm4BUGkcSvXo+DOeYGuaYyqhybzQkwecZJ2Mg=="],
+
+    "@providerkit/react": ["@providerkit/react@0.2.0", "", { "peerDependencies": { "@providerkit/agents": "^0.2.0 || ^0.3.0 || ^0.4.0", "@providerkit/core": "^0.35.1", "@shadcn/react": "^0.3.1", "react": "^19", "react-markdown": "^10.1.0", "remark-gfm": "^4.0.1" }, "optionalPeers": ["@providerkit/agents", "@providerkit/core", "@shadcn/react", "react-markdown", "remark-gfm"] }, "sha512-6Zu41Zc3RAfOmCm+rftgF4RoDXR3wQsHBw4DJZNaut8bUrzoVJXQ149eIhW4ty+m3l/S/Pa0T/Ns6Oigu2pdqA=="],
 
     "@react-native-async-storage/async-storage": ["@react-native-async-storage/async-storage@3.1.1", "", { "dependencies": { "idb": "8.0.3" }, "peerDependencies": { "react": "*", "react-native": "*" } }, "sha512-z+PnLz1n6ECKhgoHZHkfc+dijXZEyZnNFSajbtE0NEbsJhmX8x9GlOeiMQIKX2E4DUqPSgfIh4FYBv1M49KgPQ=="],
 

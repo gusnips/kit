@@ -1,6 +1,6 @@
 {
   "name": "@gusnips/native",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "What a bare React Native app needs beside @gusnips/react: streams over XHR, React Query on app focus and network, theme and language that remember the choice, the Supabase session storage, a Turnstile check that runs in a WebView, the Metro config for a bun monorepo, and the Tailwind to react-native-css build.",
   "type": "module",
   "license": "MIT",

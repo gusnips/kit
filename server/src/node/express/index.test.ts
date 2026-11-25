@@ -1,6 +1,7 @@
 import type { AddressInfo } from "node:net";
 import express, { type ErrorRequestHandler } from "express";
 import type { HttpBindings } from "@hono/node-server";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAppError, createErrorResponse, createLogger } from "../../index.ts";
@@ -10,6 +11,7 @@ import {
   type RequestVariables,
   type RestRequest,
 } from "../../hono/index.ts";
+import { allowMcpDiscovery, mcpRoutes } from "../../mcp/index.ts";
 import { fromHono } from "./index.ts";
 
 const appError = createAppError({ VALIDATION_ERROR: 400, TOO_LARGE: 413 } as const);
@@ -66,6 +68,49 @@ const reportError: ErrorRequestHandler = (err: Error, _req, res, _next) => {
 const json = { "content-type": "application/json" };
 
 describe("fromHono", () => {
+  it("opens MCP discovery for streamed requests and leaves other request bodies readable by auth", async () => {
+    const mcp = new Hono().use(
+      "/mcp/*",
+      allowMcpDiscovery("/mcp", async (c) => c.json(await c.req.raw.json(), 401)),
+    );
+    mcp.route(
+      "/",
+      mcpRoutes(
+        "/mcp",
+        () => {
+          const server = new McpServer({ name: "test", version: "0.0.0" });
+          server.registerTool("hello", {}, () => ({ content: [] }));
+          return server;
+        },
+        { allowedOrigins: new Set() },
+      ),
+    );
+    const app = express();
+    app.use("/mcp", fromHono(mcp));
+    const base = await serve(app);
+    const send = (message: object) => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(message)));
+          controller.close();
+        },
+      });
+      return fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { ...json, accept: "application/json, text/event-stream" },
+        duplex: "half",
+        body,
+      });
+    };
+    const list = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+    const catalog = await send(list);
+    expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toMatchObject({ result: { tools: [{ name: "hello" }] } });
+    const call = { ...list, method: "tools/call", params: { name: "hello" } };
+    const refused = await send(call);
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toEqual(call);
+  });
   it("hands Hono the full path, the query and the body, and leaves Express's other routes alone", async () => {
     const { app: hono } = api();
     const app = express();

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { createAppError } from "../errors.ts";
 import { createErrorResponse } from "../responses.ts";
 import {
+  allowMcpDiscovery,
   mcpRoutes,
   registerOperation,
   toolError,
@@ -434,6 +435,74 @@ describe("mcpRoutes", () => {
 });
 
 describe("guarding the door", () => {
+  it("opens discovery without allowing tool calls or bypassing the bearer challenge", async () => {
+    const { app: door, counted } = harness();
+    const challenge =
+      'Bearer resource_metadata="https://api.acme.test/.well-known/oauth-protected-resource"';
+    const guard = allowMcpDiscovery("/mcp", async (c, next) =>
+      c.req.header("authorization") === "Bearer signed-in"
+        ? next()
+        : c.json({ error: "sign in" }, 401, { "WWW-Authenticate": challenge }),
+    );
+    const app = new Hono()
+      .use("/mcp/*", guard)
+      .route("/", door)
+      .post("/mcp/store", (c) => c.json({}));
+    const list = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+    const tool = call(2, { id: "p" });
+
+    const initialized = await post(app, {
+      jsonrpc: "2.0",
+      id: 0,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test", version: "0.0.0" },
+      },
+    });
+    expect(initialized.res.status).toBe(200);
+    expect(initialized.res.headers.get("mcp-session-id")).toBeNull();
+    expect(initialized.json).toMatchObject({ result: { capabilities: { tools: {} } } });
+    expect(
+      (
+        await app.request("/mcp", {
+          method: "POST",
+          headers: HEADERS,
+          body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+        })
+      ).status,
+    ).toBe(202);
+
+    for (const path of ["/mcp", "/mcp/"]) {
+      const catalog = await post(app, list, { path });
+      expect(catalog.res.status).toBe(200);
+      expect(catalog.json).toMatchObject({ result: { tools: [{ name: "get_place" }] } });
+      for (const body of [tool, [list, tool], { ...list, method: "resources/list" }]) {
+        const { res } = await post(app, body, { path });
+        expect(res.status).toBe(401);
+        expect(res.headers.get("www-authenticate")).toBe(challenge);
+      }
+    }
+    expect((await post(app, list, { path: "/mcp/store" })).res.status).toBe(401);
+    expect((await post(app, list, { headers: { "mcp-session-id": "existing" } })).res.status).toBe(
+      401,
+    );
+    expect(
+      (await post(app, list, { headers: { authorization: "Bearer invalid" } })).res.status,
+    ).toBe(401);
+    expect((await post(app, list, { headers: { origin: "https://other.test" } })).res.status).toBe(
+      403,
+    );
+    expect((await post(app, { ...list, extra: "x".repeat(64 * 1024) })).res.status).toBe(401);
+    expect(counted).toEqual([]);
+
+    const signedIn = await post(app, tool, { headers: { authorization: "Bearer signed-in" } });
+    expect(signedIn.json).toMatchObject({
+      result: { content: [{ text: '{"data":{"id":"p","owner":"u_1"}}' }] },
+    });
+    expect(counted).toEqual(["get_place"]);
+  });
   it("covers both spellings from /mcp/*, and only one from /mcp", async () => {
     const statuses = async (guarded: string) => {
       const { app: door } = harness();

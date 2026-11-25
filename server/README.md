@@ -1770,6 +1770,25 @@ app.use("/mcp/*", async (c, next) => {
 app.route("/", mcpRoutes("/mcp", buildMcpServer, { allowedOrigins: new Set() }));
 ```
 
+If anyone can see your tool catalog, let clients browse it before they sign in:
+
+```ts
+import { allowMcpDiscovery } from "@gusnips/server/mcp";
+
+app.use("/mcp/*", allowMcpDiscovery("/mcp", requireApiKey));
+```
+
+Replace the key check above with this middleware after your pre-auth rate limit and before
+anything parses the body. Keep your HTTP `401` and `WWW-Authenticate` header in `requireApiKey`,
+so clients know how to sign in on the first tool call. Only single `initialize`, `tools/list`
+and `notifications/initialized` requests without an Authorization or session header skip the
+key check. Batches still need a key. Discovery requests are limited to 64 KiB.
+
+Build the catalog without reading account data. Load the caller and do any account work
+inside `deps` or the tool handler. If a signed-in caller sees a different set of tools, make
+sure the anonymous catalog contains only definitions you want anyone to see. Keep anonymous
+initialization stateless if your server normally creates sessions.
+
 An operation is `{ name, title, description, inputSchema, annotations, run(deps, args) }`.
 `annotations` must set all three hints: `readOnlyHint`, `destructiveHint` and `openWorldHint`.
 Clients read them to decide whether a call needs the person's approval, and Claude's and OpenAI's

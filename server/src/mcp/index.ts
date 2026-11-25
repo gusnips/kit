@@ -23,13 +23,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type {
-  CallToolResult,
-  ServerNotification,
-  ServerRequest,
-  ToolAnnotations,
+import {
+  JSONRPCMessageSchema,
+  type CallToolResult,
+  type ServerNotification,
+  type ServerRequest,
+  type ToolAnnotations,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Hono, type Context, type Env } from "hono";
+import { Hono, type Context, type Env, type MiddlewareHandler } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Logger } from "../logger/index.ts";
 import type { ErrorAnswer } from "../responses.ts";
@@ -158,6 +159,57 @@ export function registerOperation<Deps>(
 /** A JSON-RPC error with no id, which is how the SDK itself answers a request it will not take. */
 function refuse(c: Context, status: ContentfulStatusCode, message: string, headers = {}) {
   return c.json({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }, status, headers);
+}
+
+async function readDiscoveryMessage(request: Request): Promise<unknown> {
+  const maxSize = 64 * 1024;
+  if (Number(request.headers.get("content-length")) > maxSize) return;
+  // Inspect a bounded copy. The auth guard and the transport still have the original body.
+  const body = request.clone().body;
+  if (!body) return;
+  let size = 0;
+  const bounded = body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        size += chunk.byteLength;
+        if (size > maxSize) controller.error();
+        else controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Response(bounded).json();
+}
+
+/**
+ * Let clients discover public tool metadata before signing in. Mount before any body reader,
+ * after your pre-auth rate limit. The server builder must be able to list tools without a caller.
+ * Only individual discovery messages skip `authenticate`; batches and sessions always go through it.
+ */
+export function allowMcpDiscovery<E extends Env>(
+  path: `/${string}`,
+  authenticate: MiddlewareHandler<E>,
+): MiddlewareHandler<E> {
+  return async (c, next) => {
+    if (
+      (c.req.path === path || c.req.path === `${path}/`) &&
+      c.req.method === "POST" &&
+      !c.req.raw.headers.has("authorization") &&
+      !c.req.raw.headers.has("mcp-session-id")
+    ) {
+      // A batch never skips auth, even if it also contains a discovery request.
+      const body = await readDiscoveryMessage(c.req.raw).catch(() => undefined);
+      const message = JSONRPCMessageSchema.safeParse(body);
+      if (message.success && "method" in message.data) {
+        const { method } = message.data;
+        const discovery =
+          "id" in message.data
+            ? method === "initialize" || method === "tools/list"
+            : method === "notifications/initialized";
+        if (discovery) return next();
+      }
+    }
+    return authenticate(c, next);
+  };
 }
 
 /**
